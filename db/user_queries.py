@@ -460,3 +460,15 @@ async def get_user_sale_history(user_id: int):
             'purchases': [dict(row) for row in purchases]
         }   
     
+    # Добавьте эту функцию в db/user_queries.py
+async def get_all_users():
+    """Получает всех пользователей из базы данных"""
+    pool = await get_db_pool()
+    try:
+        async with pool.acquire() as conn:
+            query = "SELECT user_id, username, balance, last_free_pack, created_at FROM users"
+            rows = await conn.fetch(query)
+            return [dict(row) for row in rows]
+    except Exception as e:
+        print(f"Ошибка при получении всех пользователей: {e}")
+        return []
