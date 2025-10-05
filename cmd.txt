@@ -1,0 +1,162 @@
+-- 1. Таблица пользователей
+CREATE TABLE users (
+    user_id BIGINT PRIMARY KEY,
+    username VARCHAR(100),
+    balance INT DEFAULT 0,  -- Внутриигровая валюта
+    last_free_pack TIMESTAMP WITH TIME ZONE,  -- Время последнего бесплатного пака
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- 2. Таблица коллекций
+CREATE TABLE collections (
+    id SERIAL PRIMARY KEY,
+    name VARCHAR(100) NOT NULL,
+    description TEXT,
+    total_cards INT NOT NULL,  -- Например, 1000
+    cards_opened INT DEFAULT 0,  -- Сколько уже открыто
+    start_date TIMESTAMP WITH TIME ZONE NOT NULL,
+    end_date TIMESTAMP WITH TIME ZONE,
+    is_active BOOLEAN DEFAULT TRUE
+);
+
+-- 3. Таблица карточек (игроков)
+CREATE TABLE cards (
+    id SERIAL PRIMARY KEY,
+    collection_id INT REFERENCES collections(id) ON DELETE CASCADE,
+    player_name VARCHAR(100) NOT NULL,
+    rarity VARCHAR(20) NOT NULL,  -- 'common', 'rare', 'epic', 'legendary'
+    weight FLOAT NOT NULL,  -- legendary ~ 0.9, common ~ 0.1
+    uniq_name VARCHAR(100) NOT NULL,  -- Название файла с изображением (например, "mbappe_legendary.png")
+    is_tradable BOOLEAN DEFAULT TRUE
+);
+
+-- 4. Таблица базовых паков (всегда в игре)
+CREATE TABLE packs (
+    id SERIAL PRIMARY KEY,
+    name VARCHAR(50) NOT NULL,  -- "Бесплатный пак", "Мега-пак"
+    pack_type VARCHAR(20) NOT NULL,  -- 'free', 'premium', 'event'
+    cost INT DEFAULT 0,  -- Цена в валюте
+    cards_amount INT NOT NULL,  -- 3, 5, 10 карт
+    cooldown_hours INT,  -- Для бесплатных паков (3 часа)
+    guarantee_rarity VARCHAR(20),  -- Например, 'epic'
+    is_always_available BOOLEAN DEFAULT TRUE  -- Если FALSE, пак привязан к коллекции
+);
+
+-- 5. Карточки пользователей
+CREATE TABLE user_cards (
+    id SERIAL PRIMARY KEY,
+    user_id BIGINT REFERENCES users(user_id) ON DELETE CASCADE,
+    card_id INT REFERENCES cards(id) ON DELETE CASCADE,
+    obtained_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    is_favorite BOOLEAN DEFAULT FALSE,
+    is_locked BOOLEAN DEFAULT FALSE,  -- Для блокировки обмена
+);
+
+-- Индексы для ускорения запросов
+CREATE INDEX idx_cards_collection ON cards(collection_id);
+CREATE INDEX idx_cards_rarity ON cards(rarity);
+CREATE INDEX idx_user_cards_user ON user_cards(user_id);
+CREATE INDEX idx_user_cards_card ON user_cards(card_id);
+CREATE INDEX idx_pack_openings_user ON pack_openings(user_id);
+CREATE INDEX idx_pack_openings_time ON pack_openings(opened_at);
+
+CREATE TABLE pack_opening_cards (
+    id SERIAL PRIMARY KEY,
+    pack_opening_id INT REFERENCES pack_openings(id) ON DELETE CASCADE,
+    card_id INT REFERENCES cards(id) ON DELETE CASCADE,
+    UNIQUE(pack_opening_id, card_id)
+);
+
+ALTER TABLE user_cards DROP CONSTRAINT IF EXISTS user_cards_user_id_card_id_key;
+
+CREATE TABLE pack_openings (
+    id SERIAL PRIMARY KEY,
+    user_id BIGINT REFERENCES users(user_id) ON DELETE CASCADE,
+    pack_id VARCHAR(50), -- Может быть как INT так и VARCHAR для коллекционных
+    opened_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    cards_count INTEGER
+);
+
+ALTER TABLE user_cards ADD COLUMN serial_number INTEGER;
+
+CREATE TABLE game_results (
+    id SERIAL PRIMARY KEY,
+    user_id BIGINT REFERENCES users(user_id) ON DELETE CASCADE,
+    game_type VARCHAR(20) NOT NULL,  -- 'football_21', 'dice', etc.
+    result VARCHAR(10) NOT NULL,     -- 'win', 'lose', 'draw'
+    bet_amount INTEGER NOT NULL,
+    win_amount INTEGER DEFAULT 0,
+    player_score INTEGER,
+    opponent_score INTEGER,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- Таблица для объявлений на рынке
+CREATE TABLE IF NOT EXISTS market_listings (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER REFERENCES users(user_id) ON DELETE CASCADE,
+    card_id INTEGER REFERENCES user_cards(id) ON DELETE CASCADE,
+    price INTEGER NOT NULL CHECK (price > 0),
+    is_sold BOOLEAN DEFAULT FALSE,
+    buyer_id INTEGER REFERENCES users(user_id),
+    created_at TIMESTAMP DEFAULT NOW(),
+    sold_at TIMESTAMP,
+    UNIQUE(card_id) -- Одна карта может быть только в одном активном объявлении
+);
+
+-- Индексы для быстрого поиска
+CREATE INDEX IF NOT EXISTS idx_market_listings_user_id ON market_listings(user_id);
+CREATE INDEX IF NOT EXISTS idx_market_listings_is_sold ON market_listings(is_sold);
+CREATE INDEX IF NOT EXISTS idx_market_listings_created_at ON market_listings(created_at);
+
+-- Таблица для объявлений на рынке (НОВАЯ - самая важная для маркета)
+CREATE TABLE IF NOT EXISTS market_listings (
+    id SERIAL PRIMARY KEY,
+    user_id BIGINT REFERENCES users(user_id) ON DELETE CASCADE,
+    card_id INTEGER REFERENCES user_cards(id) ON DELETE CASCADE,
+    price INTEGER NOT NULL CHECK (price > 0),
+    is_sold BOOLEAN DEFAULT FALSE,
+    buyer_id BIGINT REFERENCES users(user_id),
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    sold_at TIMESTAMP WITH TIME ZONE,
+    UNIQUE(card_id) -- Одна карта может быть только в одном активном объявлении
+);
+
+-- Индексы для быстрого поиска (НОВЫЕ)
+CREATE INDEX IF NOT EXISTS idx_market_listings_user_id ON market_listings(user_id);
+CREATE INDEX IF NOT EXISTS idx_market_listings_is_sold ON market_listings(is_sold);
+CREATE INDEX IF NOT EXISTS idx_market_listings_created_at ON market_listings(created_at);
+CREATE INDEX IF NOT EXISTS idx_market_listings_price ON market_listings(price);
+CREATE INDEX IF NOT EXISTS idx_market_listings_card_id ON market_listings(card_id);
+
+ALTER TABLE market_listings DROP CONSTRAINT IF EXISTS market_listings_card_id_key;
+
+-- Добавляем новую таблицу для истории продаж
+CREATE TABLE IF NOT EXISTS market_sales_history (
+    id SERIAL PRIMARY KEY,
+    user_card_id INTEGER NOT NULL,
+    seller_id BIGINT REFERENCES users(user_id),
+    buyer_id BIGINT REFERENCES users(user_id),
+    price INTEGER NOT NULL,
+    sold_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    previous_owners TEXT[] DEFAULT '{}'  -- Массив предыдущих владельцев
+);
+
+-- Индексы для истории продаж
+CREATE INDEX IF NOT EXISTS idx_market_sales_user_card ON market_sales_history(user_card_id);
+CREATE INDEX IF NOT EXISTS idx_market_sales_seller ON market_sales_history(seller_id);
+CREATE INDEX IF NOT EXISTS idx_market_sales_buyer ON market_sales_history(buyer_id);
+
+CREATE TABLE IF NOT EXISTS training_results (
+    id SERIAL PRIMARY KEY,
+    user_id BIGINT REFERENCES users(user_id) ON DELETE CASCADE,
+    drill_type VARCHAR(50) NOT NULL,
+    success BOOLEAN NOT NULL,
+    reward_earned INTEGER NOT NULL,
+    level INTEGER NOT NULL DEFAULT 1,
+    trained_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_training_results_user ON training_results(user_id);
+CREATE INDEX IF NOT EXISTS idx_training_results_drill ON training_results(drill_type);
+CREATE INDEX IF NOT EXISTS idx_training_results_time ON training_results(trained_at);
