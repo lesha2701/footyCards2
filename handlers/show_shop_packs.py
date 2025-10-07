@@ -13,6 +13,7 @@ from db.card_queries import *
 
 from handlers.main_menu import show_menu
 import os
+import asyncio
 
 router = Router()
 
@@ -445,7 +446,7 @@ async def back_to_packs_menu(callback: CallbackQuery, state: FSMContext):
     await display_current_pack(callback, state)
 
 async def open_pack(callback: CallbackQuery, state: FSMContext, pack_id: int):
-    """Процесс открытия пака"""
+    """Процесс открытия пака с начислением очков"""
     user_id = callback.from_user.id
     
     print(f"[{datetime.now()}] Начало открытия пака {pack_id} для пользователя {user_id}")
@@ -500,6 +501,39 @@ async def open_pack(callback: CallbackQuery, state: FSMContext, pack_id: int):
         serial_numbers = add_result['serial_numbers']
         print(f"[{datetime.now()}] Карты добавлены пользователю {user_id}, серийные номера: {serial_numbers}")
         
+        # НАЧИСЛЯЕМ ОЧКИ ЗА КАРТЫ - ПЕРЕМЕЩЕНО В НАЧАЛО!
+        total_score_earned = 0
+        score_details = []
+        
+        print(f"[{datetime.now()}] НАЧАЛО РАСЧЕТА ОЧКОВ:")
+        
+        # Подготавливаем данные для показа
+        rarity_order = {'common': 1, 'rare': 2, 'epic': 3, 'legendary': 4}
+        sorted_cards = sorted(cards, key=lambda x: rarity_order.get(x['rarity'], 0))
+        
+        # Рассчитываем очки для каждой карты
+        for card in sorted_cards:
+            score_for_card = calculate_score_for_card(card)
+            total_score_earned += score_for_card
+            score_details.append({
+                'player_name': card['player_name'],
+                'rarity': card['rarity'],
+                'score': score_for_card
+            })
+            print(f"  Карта: {card['player_name']} ({card['rarity']}) = {score_for_card} очков")
+        
+        print(f"[{datetime.now()}] ИТОГО ОЧКОВ: {total_score_earned}")
+        
+        # Обновляем счет пользователя - ТЕПЕРЬ ПОСЛЕ РАСЧЕТА ОЧКОВ
+        if total_score_earned > 0:
+            update_result = await update_user_score(user_id, total_score_earned)
+            if update_result:
+                print(f"[{datetime.now()}] Начислено {total_score_earned} очков пользователю {user_id}. Новый счет: {update_result['score']}")
+            else:
+                print(f"[{datetime.now()}] ОШИБКА: Не удалось обновить счет пользователя {user_id}")
+        else:
+            print(f"[{datetime.now()}] Нет очков для начисления пользователю {user_id}")
+        
         # Логируем открытие
         await log_pack_opening(user_id, pack['id'], card_ids)
         print(f"[{datetime.now()}] Открытие пака {pack_id} записано в логи")
@@ -508,25 +542,33 @@ async def open_pack(callback: CallbackQuery, state: FSMContext, pack_id: int):
         await update_collection_stats_by_cards(card_ids)
         print(f"[{datetime.now()}] Статистика коллекции обновлена")
         
-        # Подготавливаем данные для показа
-        rarity_order = {'common': 1, 'rare': 2, 'epic': 3, 'legendary': 4}
-        sorted_cards = sorted(cards, key=lambda x: rarity_order.get(x['rarity'], 0))
-        
-        # Сохраняем информацию о картах
+        # Сохраняем информацию о картах и очках
         card_infos = []
-        for card in sorted_cards:
+        for i, card in enumerate(sorted_cards):
+            # Используем те же очки что уже рассчитали
+            card_score = score_details[i]['score']
             card_info = {
                 'card': card,
                 'serial_number': serial_numbers.get(card['id'], {}).get('serial_number', 0),
-                'collection_name': await get_collection_name(card.get('collection_id'))
+                'collection_name': await get_collection_name(card.get('collection_id')),
+                'score': card_score
             }
             card_infos.append(card_info)
+        
+        # ФИНАЛЬНАЯ ПРОВЕРКА СУММЫ
+        calculated_total = sum(info['score'] for info in card_infos)
+        if calculated_total != total_score_earned:
+            print(f"[{datetime.now()}] КРИТИЧЕСКАЯ ОШИБКА: расхождение в сумме очков! calculated_total={calculated_total}, total_score_earned={total_score_earned}")
+            # Используем пересчитанную сумму для надежности
+            total_score_earned = calculated_total
         
         await state.set_state(PackStates.viewing_cards)
         await state.update_data(
             card_infos=card_infos,
             current_card_index=0,
-            pack_name=pack['name']
+            pack_name=pack['name'],
+            total_score_earned=total_score_earned,
+            score_details=score_details
         )
         
         await show_opened_card(callback, state)
@@ -536,8 +578,41 @@ async def open_pack(callback: CallbackQuery, state: FSMContext, pack_id: int):
         traceback.print_exc()
         await callback.answer("❌ Ошибка при открытии пака", show_alert=True)
 
+def calculate_score_for_card(card: Dict) -> int:
+    """Рассчитывает количество очков за карту в зависимости от редкости"""
+    rarity = card.get('rarity', 'common')
+    
+    # Строго определенные диапазоны очков по редкостям
+    score_ranges = {
+        'common': (5, 10),      # обычный: строго 5-10 очков
+        'rare': (10, 15),       # редкий: строго 10-15 очков  
+        'epic': (15, 20),       # эпический: строго 15-20 очков
+        'legendary': (20, 25)   # легендарный: строго 20-25 очков
+    }
+    
+    # Получаем диапазон для данной редкости
+    if rarity not in score_ranges:
+        print(f"[{datetime.now()}] ВНИМАНИЕ: неизвестная редкость '{rarity}', используем common")
+        rarity = 'common'
+    
+    min_score, max_score = score_ranges[rarity]
+    
+    # Случайное значение в диапазоне (включительно)
+    score = random.randint(min_score, max_score)
+    
+    # ДЕБАГ: логируем расчет очков
+    print(f"[{datetime.now()}] Расчет очков: {card['player_name']} ({rarity}) -> {min_score}-{max_score} = {score} очков")
+    
+    # Дополнительная проверка на корректность диапазона
+    if not (min_score <= score <= max_score):
+        print(f"[{datetime.now()}] ОШИБКА: очки {score} вне диапазона {min_score}-{max_score} для редкости {rarity}")
+        # Возвращаем минимальное значение при ошибке
+        return min_score
+    
+    return score
+
 async def show_opened_card(callback: CallbackQuery, state: FSMContext):
-    """Показывает открытую карту с картинкой если есть"""
+    """Показывает открытую карту с картинкой и начисленными очками"""
     user_id = callback.from_user.id
     
     try:
@@ -545,6 +620,7 @@ async def show_opened_card(callback: CallbackQuery, state: FSMContext):
         card_infos = data['card_infos']
         current_index = data['current_card_index']
         pack_name = data['pack_name']
+        total_score_earned = data.get('total_score_earned', 0)
         
         current_info = card_infos[current_index]
         card = current_info['card']
@@ -555,7 +631,7 @@ async def show_opened_card(callback: CallbackQuery, state: FSMContext):
         # Получаем путь к картинке
         image_path = f"players/{card['rarity']}/{card['uniq_name']}.jpg"
         
-        # Создаем текст карточки
+        # Создаем текст карточки с информацией об очках
         card_text = (
             f"🎉 <b>НОВАЯ КАРТА!</b>\n\n"
             f"📦 <b>Пак:</b> {pack_name}\n"
@@ -563,13 +639,20 @@ async def show_opened_card(callback: CallbackQuery, state: FSMContext):
             f"{rarity_style['color']} {rarity_style['emoji']} <b>{card['player_name']}</b>\n"
             f"{rarity_style['color']} 🏷️ {rarity_style['name']}\n"
             f"{rarity_style['color']} 🔢 #{current_info['serial_number']:06d}\n"
-            f"{rarity_style['color']} ⚖️ {card['weight']:.2f}\n"
+            f"{rarity_style['color']} 🎯 {int(card['weight'])}\n"
+            f"{rarity_style['color']} ⭐ <b>Очки:</b> +{current_info['score']}\n"
         )
         
         # Добавляем информацию о коллекции
         if current_info['collection_name']:
             card_text += f"\n🏆 <b>Коллекция:</b> {current_info['collection_name']}"
         
+        # Показываем общее количество заработанных очков только на последней карте
+        if current_index == len(card_infos) - 1 and total_score_earned > 0:
+            # Всегда пересчитываем сумму для точности
+            calculated_total = sum(info['score'] for info in card_infos)
+            card_text += f"\n\n🏅 <b>Всего заработано очков за пак:</b> +{calculated_total}"
+            
         # Создаем клавиатуру
         keyboard_rows = []
         
@@ -593,7 +676,7 @@ async def show_opened_card(callback: CallbackQuery, state: FSMContext):
             action_buttons.append(InlineKeyboardButton(text="⏩ Следующая карта", callback_data="card_next"))
         
         keyboard_rows.append(action_buttons)
-        keyboard_rows.append([InlineKeyboardButton(text="🏠 В главное меню", callback_data="back_to_menu")])
+        keyboard_rows.append([InlineKeyboardButton(text="🏠 В главное меню", callback_data="back_to_menu_from_shop")])
         
         keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
         
@@ -696,22 +779,37 @@ async def back_to_shop_from_cards(callback: CallbackQuery, state: FSMContext):
         print(f"[{datetime.now()}] ОШИБКА возврата в магазин: {e}")
         await callback.answer("❌ Ошибка загрузки магазина", show_alert=True)
 
-@router.callback_query(F.data == "back_to_menu", PackStates.viewing_cards)
+@router.callback_query(F.data == "back_to_menu_from_shop", PackStates.viewing_cards)
 async def back_to_menu_from_cards(callback: CallbackQuery, state: FSMContext):
-    """Возврат в главное меню из просмотра карт"""
+    """Возврат в главное меню из просмотра карт с улучшенной логикой удаления"""
     user_id = callback.from_user.id
     print(f"[{datetime.now()}] Возврат в главное меню из просмотра карт для пользователя {user_id}")
     
-    await state.clear()
-    try:
+    try:        
+        # Очищаем состояние
+        await state.clear()
+        
         # Удаляем сообщение с картой
-        await callback.message.delete()
-    except Exception as e:
-        print(f"[{datetime.now()}] Не удалось удалить сообщение с картой: {e}")
-    
-    try:
+        try:
+            await callback.message.delete()
+            print(f"[{datetime.now()}] Сообщение с картой успешно удалено")
+        except Exception as e:
+            print(f"[{datetime.now()}] Не удалось удалить сообщение с картой: {e}")
+            # Если не удалось удалить, пытаемся отредактировать
+            try:
+                await callback.message.edit_text("🔄 Возвращаемся в меню...")
+            except:
+                pass
+        
         # Отправляем новое сообщение с меню
         await show_menu(callback, state)
+        
     except Exception as e:
         print(f"[{datetime.now()}] ОШИБКА возврата в меню: {e}")
-        await callback.answer("❌ Ошибка загрузки меню", show_alert=True)
+        # В случае ошибки пытаемся отправить меню как новое сообщение
+        try:
+            await callback.message.answer("🏠 Возвращаемся в главное меню...")
+            await show_menu(callback, state)
+        except Exception as final_error:
+            print(f"[{datetime.now()}] КРИТИЧЕСКАЯ ОШИБКА: {final_error}")
+            await callback.answer("❌ Ошибка загрузки меню", show_alert=True)

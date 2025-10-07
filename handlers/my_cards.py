@@ -227,7 +227,7 @@ async def show_card_details(callback: CallbackQuery, state: FSMContext):
         card_text = (
             f"{style['emoji']} <b>{card_info['player_name']}</b>\n\n"
             f"🏷️ <b>Редкость:</b> {style['name']}\n"
-            f"⚖️ <b>Вес:</b> {card_info['weight']:.2f}\n"
+            f"🎯 <b>Рейтинг:</b> {int(card_info['weight'])}\n"
             f"📊 <b>Копий у вас:</b> {card_details['copies_count']}\n"
         )
         

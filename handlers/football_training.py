@@ -492,7 +492,6 @@ async def handle_training_failure(callback: CallbackQuery, state: FSMContext, re
     coach_phrase = random.choice(COACH_PHRASES['failure'])
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔄 Попробовать снова", callback_data=f"start_drill:{drill_id}")],
         [InlineKeyboardButton(text="💪 Другое упражнение", callback_data="open_training")],
         [InlineKeyboardButton(text="🏠 Главное меню", callback_data="back_to_menu")]
     ])

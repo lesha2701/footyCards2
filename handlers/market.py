@@ -1,717 +1,785 @@
-from aiogram import Router, F
-from aiogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile  
+from aiogram import Router, F, Bot
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-import random
-from typing import List, Dict, Any
-from datetime import datetime
-import traceback
+from datetime import datetime, timedelta
+from aiogram.utils.markdown import html_decoration as hd
+from typing import List
 
-from db.pack_queries import *
 from db.user_queries import *
-from db.card_queries import *
-
-from handlers.main_menu import show_menu
-import os
 
 router = Router()
 
-# Стили для оформления
-class PackDesign:
-    PACK_STYLES = {
-        'standard': {
-            'icon': '📦',
-            'color': '🔵',
-            'name': 'Стандартный',
-            'header': '🛍️ СТАНДАРТНЫЕ ПАКИ'
-        }
-    }
+# Состояния для маркета
+class MarketStates(StatesGroup):
+    selecting_card = State()
+    setting_price = State()
+    editing_price = State()
+    searching_card = State()
+    filtering_rarity = State()
+    viewing_history = State()
+
+
+# Меню маркета
+@router.callback_query(F.data == "market_menu")
+async def market_menu(callback: CallbackQuery, state: FSMContext):
+    text = """<b>🏪 Футбольный Маркет</b>
+
+📊 <i>Торговая площадка для настоящих коллекционеров</i>
+
+🎯 Выберите действие:"""
     
-    RARITY_STYLES = {
-        'common': {'emoji': '⚪', 'name': 'Обычная', 'color': '⚪'},
-        'rare': {'emoji': '🔵', 'name': 'Редкая', 'color': '🔵'},
-        'epic': {'emoji': '🟣', 'name': 'Эпическая', 'color': '🟣'},
-        'legendary': {'emoji': '🟡', 'name': 'Легендарная', 'color': '🟡'}
-    }
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📤 Выставить на продажу", callback_data="market_sell")],
+        [InlineKeyboardButton(text="📋 Мои предложения", callback_data="market_my_listings")],
+        [InlineKeyboardButton(text="🛒 Обзор рынка", callback_data="market_browse")],
+        [InlineKeyboardButton(text="🔍 Поиск по ID", callback_data="market_search")],
+        [InlineKeyboardButton(text="📈 Мои сделки", callback_data="market_my_deals")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_menu")]
+    ])
+    
+    await callback.message.edit_text(text, reply_markup=keyboard)
 
-class PackStates(StatesGroup):
-    viewing_packs = State()
-    viewing_cards = State()
-    confirm_purchase = State()
-
-async def create_pack_card(pack: Dict, user_balance: int, user_id: int = None) -> str:
-    """Создает красивую карточку пака"""
-    try:
-        print(f"[{datetime.now()}] Начало создания карточки пака {pack.get('id', 'unknown')} для пользователя {user_id}")
-        
-        style = PackDesign.PACK_STYLES.get(pack['pack_type'], PackDesign.PACK_STYLES['standard'])
-        
-        # Заголовок пака
-        header = f"{style['icon']} <b>{pack['name']}</b>\n"
-        
-        # Описание
-        description = f"<i>{pack['description']}</i>\n\n" if pack.get('description') else "\n"
-        
-        # Информация о картах
-        content = f"🎴 <b>Карт в паке:</b> {pack['cards_amount']}\n"
-        
-        # Шансы редкостей в виде прогресс-баров
-        chances = "🎲 <b>Шансы редкостей:</b>\n"
-        rarity_chances = [
-            ('common', pack['common_chance']),
-            ('rare', pack['rare_chance']), 
-            ('epic', pack['epic_chance']),
-            ('legendary', pack['legendary_chance'])
-        ]
-        
-        for rarity, chance in rarity_chances:
-            if chance > 0:
-                bar = "█" * max(1, round(chance / 10))
-                spaces = " " * (10 - len(bar))
-                chances += f"{PackDesign.RARITY_STYLES[rarity]['emoji']} {bar}{spaces} {chance}%\n"
-        
-        # Стоимость и доступность
-        price_section = ""
-        if pack['cost'] == 0:
-            price_section = "💸 <b>Стоимость:</b> БЕСПЛАТНО\n"
-            if user_id:
-                can_open, time_left = await can_open_free_pack(user_id)
-                if can_open:
-                    status = "🟢 <b>Готов к открытию!</b>"
-                else:
-                    hours = int(time_left // 3600)
-                    mins = int((time_left % 3600) // 60)
-                    status = f"⏰ <b>Доступно через:</b> {hours}ч {mins}м"
-            else:
-                status = "🟢 <b>Готов к открытию!</b>"
-        else:
-            price_section = f"💰 <b>Стоимость:</b> {pack['cost']} монет\n"
-            can_afford = user_balance >= pack['cost']
-            status = "🟢 <b>Доступно для покупки</b>" if can_afford else "🔴 <b>Недостаточно монет</b>"
-        
-        # Собираем карточку
-        card_text = (
-            f"{header}"
-            f"{description}"
-            f"{content}\n"
-            f"{chances}\n"
-            f"{price_section}\n"
-            f"{status}"
-        )
-        return card_text
-        
-    except Exception as e:
-        print(f"[{datetime.now()}] ОШИБКА создания карточки пака: {e}")
-        traceback.print_exc()
-        return "❌ Ошибка создания карточки пака"
-
-async def create_packs_keyboard(
-    packs: List[Dict], 
-    current_index: int,
-    user_id: int = None,
-    show_collections: bool = False
-) -> InlineKeyboardMarkup:
-    """Создает интерактивную клавиатуру для паков"""
-    try:
-        
-        current_pack = packs[current_index]
-        user = await get_user_by_id(user_id) if user_id else None
-        
-        # Кнопки навигации
-        navigation_buttons = []
-        if len(packs) > 1:
-            navigation_buttons = [
-                InlineKeyboardButton(text="◀️", callback_data=f"pack_prev_{current_index}"),
-                InlineKeyboardButton(text=f"📄 {current_index + 1}/{len(packs)}", callback_data="pack_info"),
-                InlineKeyboardButton(text="▶️", callback_data=f"pack_next_{current_index}")
-            ]
-        
-        # Основная кнопка действия
-        if current_pack['cost'] == 0:
-            can_open, _ = await can_open_free_pack(user_id) if user_id else (True, 0)
-            action_text = "🎁 Открыть пак" if can_open else "⏳ Недоступно"
-            callback_data = f"pack_open_{current_pack['id']}" if can_open else "pack_cant_open"
-        else:
-            can_afford = user and user['balance'] >= current_pack['cost']
-            action_text = "💎 Купить пак" if can_afford else "💸 Недостаточно"
-            callback_data = f"pack_confirm_{current_pack['id']}" if can_afford else "pack_cant_buy"
-        
-        action_button = [InlineKeyboardButton(text=action_text, callback_data=callback_data)]
-        
-        # Кнопка возврата
-        back_button = [InlineKeyboardButton(text="🏠 В главное меню", callback_data="back_to_menu")]
-        
-        # Собираем клавиатуру
-        keyboard_rows = []
-        if navigation_buttons:
-            keyboard_rows.append(navigation_buttons)
-        keyboard_rows.append(action_button)
-        keyboard_rows.append(back_button)
-
-        return InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
-        
-    except Exception as e:
-        print(f"[{datetime.now()}] ОШИБКА создания клавиатуры паков: {e}")
-        traceback.print_exc()
-        # Возвращаем простую клавиатуру при ошибке
-        return InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🏠 В главное меню", callback_data="back_to_menu")]
-        ])
-
-async def create_confirmation_keyboard(pack_id) -> InlineKeyboardMarkup:
-    """Клавиатура для подтверждения покупки"""
-    try:
-        return InlineKeyboardMarkup(inline_keyboard=[
-            [
-                InlineKeyboardButton(text="✅ Да, покупаю!", callback_data=f"pack_buy_{pack_id}"),
-                InlineKeyboardButton(text="❌ Отмена", callback_data="pack_cancel")
-            ],
-            [
-                InlineKeyboardButton(text="↩️ Назад к пакам", callback_data="back_to_packs")
-            ]
-        ])
-    except Exception as e:
-        print(f"[{datetime.now()}] ОШИБКА создания клавиатуры подтверждения: {e}")
-        raise
-
-@router.callback_query(F.data == "show_shop_packs")
-async def show_packs_menu(callback: CallbackQuery, state: FSMContext):
-    """Показывает меню паков"""
+# 1. Выставить игрока на продажу - НОВАЯ ВЕРСИЯ С СПИСКОМ
+@router.callback_query(F.data == "market_sell")
+async def market_sell_start(callback: CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
+    user_cards = await get_user_cards_for_market(user_id)
     
-    try:
-        user = await get_user_by_id(user_id)
-        
-        # Получаем все доступные паки
-        all_packs = await get_available_packs(user_id)
-        print(f"[{datetime.now()}] Получено {len(all_packs)} доступных паков для пользователя {user_id}")
-        
-        # Разделяем на обычные и коллекционные
-        standard_packs = [p for p in all_packs if p['pack_type'] == 'standard']
-        collection_packs = [p for p in all_packs if p['pack_type'] == 'collection']
-        
-        await state.update_data(
-            standard_packs=standard_packs,
-            collection_packs=collection_packs,
-            current_view='standard',
-            current_index=0
-        )
-        
-        # Всегда отправляем новое сообщение для магазина
-        try:
-            # Пытаемся удалить предыдущее сообщение если это callback
-            if hasattr(callback, 'message'):
-                await callback.message.delete()
-                print(f"[{datetime.now()}] Предыдущее сообщение удалено")
-        except Exception as e:
-            print(f"[{datetime.now()}] Не удалось удалить предыдущее сообщение: {e}")
-        
-        # Создаем временное сообщение для редактирования
-        temp_message = await callback.message.answer("🔄 Загрузка магазина...")
-        
-        # Используем это сообщение для отображения паков
-        await display_current_pack(callback, state, temp_message)
-        
-    except Exception as e:
-        print(f"[{datetime.now()}] КРИТИЧЕСКАЯ ОШИБКА в show_packs_menu: {e}")
-        traceback.print_exc()
-        await callback.answer("❌ Ошибка загрузки магазина", show_alert=True)
+    if not user_cards:
+        await callback.answer("У вас нет карточек для продажи", show_alert=True)
+        return
+    
+    available_cards = [card for card in user_cards if card['already_listed'] == 0]
+    
+    if not available_cards:
+        await callback.answer("Все ваши карточки уже выставлены на продажу", show_alert=True)
+        return
+    
+    await state.update_data(available_cards=available_cards, current_page=0, filter_rarity='all')
+    await show_cards_list(callback, state)
 
-async def display_current_pack(callback: CallbackQuery, state: FSMContext, message_to_edit=None):
-    """Отображает текущий пак"""
-    user_id = callback.from_user.id
+async def show_cards_list(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    available_cards = data['available_cards']
+    current_page = data['current_page']
+    filter_rarity = data.get('filter_rarity', 'all')
     
-    try:
-        data = await state.get_data()
-        user = await get_user_by_id(user_id)
-        
-        current_view = data.get('current_view', 'standard')
-        current_index = data.get('current_index', 0)
-        
-        packs = data['standard_packs'] if current_view == 'standard' else data['collection_packs']
-        style = PackDesign.PACK_STYLES.get(current_view, PackDesign.PACK_STYLES['standard'])
-        
-        print(f"[{datetime.now()}] Отображение пака {current_index} типа {current_view} для пользователя {user_id}")
-        
-        if not packs:
-            message = (
-                f"{style['icon']} <b>{style['header']}</b>\n\n"
-                "📭 <b>Паков не найдено</b>\n\n"
-                "В данный момент нет доступных паков этого типа.\n"
-                "Новые паки появятся скоро! 🎯"
+    # Фильтрация по редкости
+    if filter_rarity != 'all':
+        filtered_cards = [card for card in available_cards if card['rarity'] == filter_rarity]
+    else:
+        filtered_cards = available_cards
+    
+    start_idx = current_page * 5
+    end_idx = min(start_idx + 5, len(filtered_cards))
+    page_cards = filtered_cards[start_idx:end_idx]
+    
+    if not page_cards:
+        await callback.answer("🎴 Карточки не найдены", show_alert=True)
+        return
+    
+    text = f"""<b>🎴 Выбор карточки для продажи</b>
+
+📄 Страница {current_page + 1}/{(len(filtered_cards) - 1) // 5 + 1}
+🎯 Фильтр: {get_rarity_display_name(filter_rarity)}
+
+<blockquote>"""
+    
+    for i, card in enumerate(page_cards, start=1):
+        emoji = get_rarity_emoji(card['rarity'])
+        text += f"""
+{emoji} <b>{card['player_name']}</b>
+├ Редкость: {card['rarity'].capitalize()}
+├ Коллекция: {card['collection_name']}
+├ Вес: {card['weight']}
+├ Номер: #{card['serial_number']}
+└ ID: <code>{card['user_card_id']}</code>
+
+"""
+    
+    text += "</blockquote>"
+    
+    keyboard_buttons = []
+    
+    # Кнопки выбора карточек
+    for i, card in enumerate(page_cards, start=1):
+        emoji = get_rarity_emoji(card['rarity'])
+        keyboard_buttons.append([
+            InlineKeyboardButton(
+                text=f"{emoji} {card['player_name'][:12]}...", 
+                callback_data=f"select_card_{card['user_card_id']}"
             )
+        ])
+    
+    # Навигация
+    nav_buttons = []
+    if current_page > 0:
+        nav_buttons.append(InlineKeyboardButton(text="⏪", callback_data="prev_cards_page"))
+    
+    if end_idx < len(filtered_cards):
+        nav_buttons.append(InlineKeyboardButton(text="⏩", callback_data="next_cards_page"))
+    
+    if nav_buttons:
+        keyboard_buttons.append(nav_buttons)
+    
+    # Фильтры
+    filter_buttons = [
+        InlineKeyboardButton(text="⭐", callback_data="market_cards_filter_all"),
+        InlineKeyboardButton(text="⚪", callback_data="market_cards_filter_common"),
+        InlineKeyboardButton(text="🔵", callback_data="market_cards_filter_rare"),
+        InlineKeyboardButton(text="🟣", callback_data="market_cards_filter_epic"),
+        InlineKeyboardButton(text="🟡", callback_data="market_cards_filter_legendary")
+    ]
+
+    keyboard_buttons.append(filter_buttons)
+    
+    keyboard_buttons.append([
+        InlineKeyboardButton(text="🏠 В меню", callback_data="market_menu")
+    ])
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
+    await callback.message.edit_text(text, reply_markup=keyboard)
+
+@router.callback_query(F.data == "market_my_deals")
+async def show_my_deals(callback: CallbackQuery, state: FSMContext):
+    user_id = callback.from_user.id
+    history = await get_user_sale_history(user_id)
+    
+    text = """<b>📈 История моих сделок</b>
+
+💼 <i>Ваши продажи и покупки на маркете</i>"""
+    
+    # Продажи
+    if history['sales']:
+        text += "\n\n💰 <b>Продажи:</b>\n<blockquote>"
+        for sale in history['sales'][:5]:
+            text += f"""
+🎯 {sale['player_name']}
+├ 💰 {sale['price']} монет
+├ 👤 {sale['buyer_name']}
+└ 📅 {sale['sold_at'].strftime('%d.%m.%Y')}
+"""
+        text += "</blockquote>"
+    else:
+        text += "\n\n📭 <i>У вас еще не было продаж</i>"
+    
+    # Покупки
+    if history['purchases']:
+        text += "\n\n🛒 <b>Покупки:</b>\n<blockquote>"
+        for purchase in history['purchases'][:5]:
+            text += f"""
+🎯 {purchase['player_name']}
+├ 💰 {purchase['price']} монет
+├ 👤 {purchase['seller_name']}
+└ 📅 {purchase['sold_at'].strftime('%d.%m.%Y')}
+"""
+        text += "</blockquote>"
+    else:
+        text += "\n\n📭 <i>У вас еще не было покупок</i>"
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔄 Обновить", callback_data="market_my_deals")],
+        [InlineKeyboardButton(text="🏠 В меню", callback_data="market_menu")]
+    ])
+    
+    await callback.message.edit_text(text, reply_markup=keyboard)
+
+
+@router.callback_query(F.data.startswith("market_cards_filter_"))
+async def filter_cards_rarity(callback: CallbackQuery, state: FSMContext):
+    filter_type = callback.data.split("_")[3]  # Измените индекс
+    await state.update_data(filter_rarity=filter_type, current_page=0)
+    await show_cards_list(callback, state)
+
+@router.callback_query(F.data.startswith("select_card_"))
+async def select_card_for_sale(callback: CallbackQuery, state: FSMContext):
+    try:
+        user_card_id = int(callback.data.split("_")[2])  # Конвертируем в int
+        await state.update_data(selected_card_id=user_card_id)
+        await state.set_state(MarketStates.setting_price)
+        
+        data = await state.get_data()
+        available_cards = data['available_cards']
+        card = next((c for c in available_cards if c['user_card_id'] == user_card_id), None)
+        
+        if card:
+            text = f"""<b>🎴 Установка цены</b>
+
+<blockquote>
+<b>{card['player_name']}</b>
+├ Редкость: {get_rarity_emoji(card['rarity'])} {card['rarity'].capitalize()}
+├ Коллекция: {card['collection_name']}
+├ Вес: {card['weight']}
+├ Номер: #{card['serial_number']}
+└ ID: <code>{card['user_card_id']}</code>
+</blockquote>
+
+💵 Введите цену продажи:"""
+            
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="📦 К стандартным пакам", callback_data="toggle_collections")],
-                [InlineKeyboardButton(text="🏠 В главное меню", callback_data="back_to_menu")]
+                [InlineKeyboardButton(text="🔙 Отмена", callback_data="market_sell")]
             ])
             
-            if message_to_edit:
-                await message_to_edit.edit_text(message, reply_markup=keyboard, parse_mode="HTML")
-            else:
-                await callback.message.edit_text(message, reply_markup=keyboard, parse_mode="HTML")
+            await callback.message.edit_text(text, reply_markup=keyboard)
+        else:
+            await callback.answer("Ошибка выбора карточки", show_alert=True)
+    except ValueError:
+        await callback.answer("Ошибка формата ID карточки", show_alert=True)
+
+@router.message(MarketStates.setting_price)
+async def set_card_price(message: Message, state: FSMContext):
+    try:
+        price = int(message.text)
+        if price <= 0:
+            await message.answer("❌ Цена должна быть положительным числом")
             return
-        
-        current_pack = packs[current_index]
-        
-        # Создаем карточку пака
-        pack_card = await create_pack_card(current_pack, user['balance'], user_id)
-        
-        # Полное сообщение с красивым заголовком
-        full_message = (
-            f"{style['icon']} <b>{style['header']}</b>\n\n"
-            f"💰 <b>Ваш баланс:</b> {user['balance']} монет\n\n"
-            f"{pack_card}"
-        )
-        
-        keyboard = await create_packs_keyboard(
-            packs, current_index, user_id, 
-            show_collections=(current_view == 'collection')
-        )
-        
-        if message_to_edit:
-            await message_to_edit.edit_text(
-                text=full_message,
-                reply_markup=keyboard,
-                parse_mode="HTML"
-            )
-        else:
-            await callback.message.edit_text(
-                text=full_message,
-                reply_markup=keyboard,
-                parse_mode="HTML"
-            )
-        
-    except Exception as e:
-        print(f"[{datetime.now()}] ОШИБКА отображения пака: {e}")
-        traceback.print_exc()
-        await callback.answer("❌ Ошибка отображения пака", show_alert=True)
-
-@router.callback_query(F.data.startswith("pack_confirm_"))
-async def confirm_pack_purchase(callback: CallbackQuery, state: FSMContext):
-    """Подтверждение покупки пака"""
-    user_id = callback.from_user.id
-    
-    try:
-        pack_id_str = callback.data.split("_")[2]
-        print(f"[{datetime.now()}] Подтверждение покупки пака {pack_id_str} для пользователя {user_id}")
-        
-        # Определяем тип pack_id
-        if pack_id_str.startswith('collection'):
-            pack_id = pack_id_str
-        else:
-            pack_id = int(pack_id_str)
             
-        user = await get_user_by_id(user_id)
-        pack = await get_pack_by_id(pack_id)
-        
-        if not pack:
-            print(f"[{datetime.now()}] Пак {pack_id} не найден")
-            await callback.answer("❌ Пак не найден", show_alert=True)
-            return
-        
-        confirmation_text = (
-            f"🛒 <b>Подтверждение покупки</b>\n\n"
-            f"📦 <b>Пак:</b> {pack['name']}\n"
-            f"💳 <b>Стоимость:</b> {pack['cost']} монет\n"
-            f"🎴 <b>Карт в паке:</b> {pack['cards_amount']}\n\n"
-            f"💰 <b>Текущий баланс:</b> {user['balance']} монет\n"
-            f"💸 <b>Баланс после покупки:</b> {user['balance'] - pack['cost']} монет\n\n"
-            f"<i>Вы уверены, что хотите купить этот пак?</i>"
-        )
-        
-        keyboard = await create_confirmation_keyboard(pack_id)
-        
-        await callback.message.edit_text(
-            text=confirmation_text,
-            reply_markup=keyboard,
-            parse_mode="HTML"
-        )
-        
-        await state.set_state(PackStates.confirm_purchase)
-        
-    except Exception as e:
-        print(f"[{datetime.now()}] ОШИБКА в confirm_pack_purchase: {e}")
-        traceback.print_exc()
-        await callback.answer("❌ Ошибка подтверждения", show_alert=True)
-
-@router.callback_query(F.data.startswith("pack_buy_"))
-async def process_pack_purchase(callback: CallbackQuery, state: FSMContext):
-    """Обработка покупки пака"""
-    user_id = callback.from_user.id
-    
-    try:
-        pack_id_str = callback.data.split("_")[2]
-        print(f"[{datetime.now()}] Обработка покупки пака {pack_id_str} для пользователя {user_id}")
-        
-        # Определяем тип pack_id
-        if pack_id_str.startswith('collection'):
-            pack_id = pack_id_str
-        else:
-            pack_id = int(pack_id_str)
-            
-        await open_pack(callback, state, pack_id)
-        
-    except Exception as e:
-        print(f"[{datetime.now()}] ОШИБКА в process_pack_purchase: {e}")
-        traceback.print_exc()
-        await callback.answer("❌ Ошибка при покупке", show_alert=True)
-        await state.clear()
-
-@router.callback_query(F.data == "pack_cancel")
-async def cancel_purchase(callback: CallbackQuery, state: FSMContext):
-    """Отмена покупки"""
-    user_id = callback.from_user.id
-    print(f"[{datetime.now()}] Отмена покупки пользователем {user_id}")
-    
-    await callback.answer("❌ Покупка отменена")
-    await state.set_state(PackStates.viewing_packs)
-    await display_current_pack(callback, state)
-
-@router.callback_query(F.data.startswith("pack_"))
-async def handle_pack_actions(callback: CallbackQuery, state: FSMContext):
-    """Обработка действий с паками"""
-    user_id = callback.from_user.id
-    action = callback.data.split("_")[1]
-    
-    print(f"[{datetime.now()}] Обработка действия пака: {callback.data} для пользователя {user_id}")
-    
-    try:
         data = await state.get_data()
-        current_view = data.get('current_view', 'standard')
-        current_index = data.get('current_index', 0)
+        user_card_id = data['selected_card_id']
         
-        packs = data['standard_packs'] if current_view == 'standard' else data['collection_packs']
-        
-        if action == "prev":
-            new_index = (current_index - 1) % len(packs)
-            await state.update_data(current_index=new_index)
-            await display_current_pack(callback, state)
-            print(f"[{datetime.now()}] Переход к предыдущему паку: {new_index}")
-            
-        elif action == "next":
-            new_index = (current_index + 1) % len(packs)
-            await state.update_data(current_index=new_index)
-            await display_current_pack(callback, state)
-            print(f"[{datetime.now()}] Переход к следующему паку: {new_index}")
-            
-        elif action == "open":
-            pack_id = int(callback.data.split("_")[2])
-            print(f"[{datetime.now()}] Запрос на открытие пака {pack_id}")
-            await open_pack(callback, state, pack_id)
-            
-        elif action == "cant":
-            if callback.data == "pack_cant_open":
-                print(f"[{datetime.now()}] Пользователь {user_id} пытается открыть недоступный бесплатный пак")
-                await callback.answer("⏳ Бесплатный пак будет доступен позже!", show_alert=True)
-            else:
-                print(f"[{datetime.now()}] Пользователь {user_id} пытается купить пак без средств")
-                await callback.answer("💸 Недостаточно монет для покупки!", show_alert=True)
-        
-        await callback.answer()
-        
-    except Exception as e:
-        print(f"[{datetime.now()}] ОШИБКА обработки действия пака: {e}")
-        traceback.print_exc()
-        await callback.answer("❌ Ошибка обработки действия", show_alert=True)
-
-@router.callback_query(F.data == "toggle_collections")
-async def toggle_collections_view(callback: CallbackQuery, state: FSMContext):
-    """Переключение между стандартными и коллекционными паками"""
-    user_id = callback.from_user.id
-    
-    try:
-        data = await state.get_data()
-        current_view = data.get('current_view', 'standard')
-        
-        new_view = 'collection' if current_view == 'standard' else 'standard'
-        await state.update_data(current_view=new_view, current_index=0)
-        
-        print(f"[{datetime.now()}] Пользователь {user_id} переключил вид паков с {current_view} на {new_view}")
-        
-        await display_current_pack(callback, state)
-        await callback.answer(f"📦 Переключено на {new_view} паки")
-        
-    except Exception as e:
-        print(f"[{datetime.now()}] ОШИБКА переключения вида паков: {e}")
-        await callback.answer("❌ Ошибка переключения", show_alert=True)
-
-@router.callback_query(F.data == "back_to_packs")
-async def back_to_packs_menu(callback: CallbackQuery, state: FSMContext):
-    """Возврат к меню паков"""
-    user_id = callback.from_user.id
-    print(f"[{datetime.now()}] Возврат к меню паков пользователем {user_id}")
-    
-    await state.set_state(PackStates.viewing_packs)
-    await display_current_pack(callback, state)
-
-async def open_pack(callback: CallbackQuery, state: FSMContext, pack_id: int):
-    """Процесс открытия пака"""
-    user_id = callback.from_user.id
-    
-    print(f"[{datetime.now()}] Начало открытия пака {pack_id} для пользователя {user_id}")
-    
-    try:
-        user = await get_user_by_id(user_id)
-        pack = await get_pack_by_id(pack_id)
-        
-        if not pack:
-            print(f"[{datetime.now()}] Пак {pack_id} не найден при открытии")
-            await callback.answer("❌ Пак не найден", show_alert=True)
-            return
-        
-        # Проверяем возможность открытия
-        if pack['cost'] == 0:
-            can_open, time_left = await can_open_free_pack(user_id)
-            if not can_open:
-                hours = int(time_left // 3600)
-                mins = int((time_left % 3600) // 60)
-                print(f"[{datetime.now()}] Бесплатный пак недоступен для пользователя {user_id}, осталось {hours}ч {mins}м")
-                await callback.answer(f"⏳ Доступно через {hours}ч {mins}м", show_alert=True)
+        # Убедимся, что user_card_id - целое число
+        if isinstance(user_card_id, str):
+            try:
+                user_card_id = int(user_card_id)
+            except ValueError:
+                await message.answer("❌ Ошибка: неверный формат ID карточки")
                 return
         
-        if pack['cost'] > 0 and user['balance'] < pack['cost']:
-            print(f"[{datetime.now()}] Недостаточно средств у пользователя {user_id}: баланс {user['balance']}, стоимость {pack['cost']}")
-            await callback.answer("❌ Недостаточно монет", show_alert=True)
-            return
+        result = await create_market_listing(message.from_user.id, user_card_id, price)
         
-        # Списание стоимости
-        if pack['cost'] > 0:
-            await update_user_balance(user_id, -pack['cost'])
-            print(f"[{datetime.now()}] Списано {pack['cost']} монет с пользователя {user_id}")
-        else:
-            await update_last_pack_time(user_id)
-            print(f"[{datetime.now()}] Обновлено время открытия бесплатного пака для пользователя {user_id}")
-        
-        # Генерация карт
-        cards = await generate_pack_cards(pack)
-        print(f"[{datetime.now()}] Сгенерировано {len(cards)} карт для пака {pack_id}")
-        
-        if not cards:
-            # Возвращаем деньги если карты не сгенерировались
-            if pack['cost'] > 0:
-                await update_user_balance(user_id, pack['cost'])
-                print(f"[{datetime.now()}] Возвращены {pack['cost']} монет пользователю {user_id} из-за ошибки генерации")
-            await callback.answer("❌ Ошибка генерации карт", show_alert=True)
-            return
-        
-        # Добавляем карты пользователю
-        card_ids = [card['id'] for card in cards]
-        add_result = await add_cards_to_user(user_id, card_ids)
-        serial_numbers = add_result['serial_numbers']
-        print(f"[{datetime.now()}] Карты добавлены пользователю {user_id}, серийные номера: {serial_numbers}")
-        
-        # Логируем открытие
-        await log_pack_opening(user_id, pack['id'], card_ids)
-        print(f"[{datetime.now()}] Открытие пака {pack_id} записано в логи")
-        
-        # Обновляем статистику
-        await update_collection_stats_by_cards(card_ids)
-        print(f"[{datetime.now()}] Статистика коллекции обновлена")
-        
-        # Подготавливаем данные для показа
-        rarity_order = {'common': 1, 'rare': 2, 'epic': 3, 'legendary': 4}
-        sorted_cards = sorted(cards, key=lambda x: rarity_order.get(x['rarity'], 0))
-        
-        # Сохраняем информацию о картах
-        card_infos = []
-        for card in sorted_cards:
-            card_info = {
-                'card': card,
-                'serial_number': serial_numbers.get(card['id'], {}).get('serial_number', 0),
-                'collection_name': await get_collection_name(card.get('collection_id'))
-            }
-            card_infos.append(card_info)
-        
-        await state.set_state(PackStates.viewing_cards)
-        await state.update_data(
-            card_infos=card_infos,
-            current_card_index=0,
-            pack_name=pack['name']
-        )
-        
-        await show_opened_card(callback, state)
-        
-    except Exception as e:
-        print(f"[{datetime.now()}] КРИТИЧЕСКАЯ ОШИБКА при открытии пака: {e}")
-        traceback.print_exc()
-        await callback.answer("❌ Ошибка при открытии пака", show_alert=True)
-
-async def show_opened_card(callback: CallbackQuery, state: FSMContext):
-    """Показывает открытую карту с картинкой если есть"""
-    user_id = callback.from_user.id
-    
-    try:
-        data = await state.get_data()
-        card_infos = data['card_infos']
-        current_index = data['current_card_index']
-        pack_name = data['pack_name']
-        
-        current_info = card_infos[current_index]
-        card = current_info['card']
-        rarity_style = PackDesign.RARITY_STYLES.get(card['rarity'], PackDesign.RARITY_STYLES['common'])
-        
-        print(f"[{datetime.now()}] Отображение карты {current_index + 1}/{len(card_infos)} для пользователя {user_id}, редкость: {card['rarity']}")
-        
-        # Получаем путь к картинке
-        image_path = f"players/{card['rarity']}/{card['uniq_name']}.jpg"
-        
-        # Создаем текст карточки
-        card_text = (
-            f"🎉 <b>НОВАЯ КАРТА!</b>\n\n"
-            f"📦 <b>Пак:</b> {pack_name}\n"
-            f"🎴 <b>Карта {current_index + 1}/{len(card_infos)}</b>\n\n"
-            f"{rarity_style['color']} {rarity_style['emoji']} <b>{card['player_name']}</b>\n"
-            f"{rarity_style['color']} 🏷️ {rarity_style['name']}\n"
-            f"{rarity_style['color']} 🔢 #{current_info['serial_number']:06d}\n"
-            f"{rarity_style['color']} ⚖️ {card['weight']:.2f}\n"
-        )
-        
-        # Добавляем информацию о коллекции
-        if current_info['collection_name']:
-            card_text += f"\n🏆 <b>Коллекция:</b> {current_info['collection_name']}"
-        
-        # Создаем клавиатуру
-        keyboard_rows = []
-        
-        # Навигация если карт больше одной
-        if len(card_infos) > 1:
-            nav_buttons = []
-            if current_index > 0:
-                nav_buttons.append(InlineKeyboardButton(text="◀️ Назад", callback_data="card_prev"))
-            nav_buttons.append(InlineKeyboardButton(text=f"{current_index + 1}/{len(card_infos)}", callback_data="card_info"))
-            if current_index < len(card_infos) - 1:
-                nav_buttons.append(InlineKeyboardButton(text="Вперед ▶️", callback_data="card_next"))
-            keyboard_rows.append(nav_buttons)
-        
-        # Основные кнопки
-        action_buttons = []
-        if current_index == len(card_infos) - 1:
-            # Если это последняя карта, показываем кнопку для открытия еще паков
-            action_buttons.append(InlineKeyboardButton(text="📦 Открыть ещё паков", callback_data="show_shop_packs"))
-        else:
-            # Если не последняя карта, показываем кнопку для быстрого перехода к следующей
-            action_buttons.append(InlineKeyboardButton(text="⏩ Следующая карта", callback_data="card_next"))
-        
-        keyboard_rows.append(action_buttons)
-        keyboard_rows.append([InlineKeyboardButton(text="🏠 В главное меню", callback_data="back_to_menu")])
-        
-        keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
-        
-        # Всегда отправляем новое сообщение
-        try:
-            # Удаляем предыдущее сообщение
-            await callback.message.delete()
-            print(f"[{datetime.now()}] Предыдущее сообщение с картой удалено")
-        except Exception as e:
-            print(f"[{datetime.now()}] Не удалось удалить предыдущее сообщение: {e}")
-        
-        if os.path.exists(image_path):
-            photo = FSInputFile(image_path)
-            await callback.message.answer_photo(
-                photo=photo,
-                caption=card_text,
-                reply_markup=keyboard,
-                parse_mode="HTML"
+        if result:
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🏪 Вернуться в маркет", callback_data="market_menu")]
+            ])
+            await message.answer(
+                f"✅ Карточка успешно выставлена на продажу за <b>{price} монет</b>!\n"
+                f"ID карточки: <code>{user_card_id}</code>",
+                reply_markup=keyboard
             )
+            await state.clear()
         else:
-            await callback.message.answer(
-                text=card_text,
-                reply_markup=keyboard,
-                parse_mode="HTML"
-            )
+            await message.answer("❌ Ошибка при создании объявления")
             
-    except Exception as e:
-        print(f"[{datetime.now()}] ОШИБКА отображения карты: {e}")
-        traceback.print_exc()
-        await callback.answer("❌ Ошибка отображения карты", show_alert=True)
+    except ValueError:
+        await message.answer("Пожалуйста, введите корректное число")
 
-@router.callback_query(F.data.in_(["card_prev", "card_next", "card_info"]))
-async def navigate_opened_cards(callback: CallbackQuery, state: FSMContext):
-    """Навигация по открытым картам с поддержкой картинок"""
+# 2. Мои предложения на продажу - НОВАЯ ВЕРСИЯ С СПИСКОМ
+@router.callback_query(F.data == "market_my_listings")
+async def show_my_listings(callback: CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
+    listings = await get_user_market_listings(user_id)
     
+    if not listings:
+        await callback.answer("У вас нет активных предложений", show_alert=True)
+        return
+    
+    await state.update_data(my_listings=listings, current_page=0)
+    await show_listings_list(callback, state)
+
+async def show_listings_list(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    listings = data['my_listings']
+    current_page = data['current_page']
+    
+    start_idx = current_page * 5
+    end_idx = min(start_idx + 5, len(listings))
+    page_listings = listings[start_idx:end_idx]
+    
+    if not page_listings:
+        await callback.answer("Предложения не найдены", show_alert=True)
+        return
+    
+    text = f"""<b>📋 Мои предложения на продажу</b>
+
+📄 Страница {current_page + 1}/{(len(listings) - 1) // 5 + 1}
+
+<blockquote>"""
+    
+    for i, listing in enumerate(page_listings, start=1):
+        emoji = get_rarity_emoji(listing['rarity'])
+        text += f"""
+{emoji} <b>{listing['player_name']}</b>
+├ 💵 <b>Цена:</b> {listing['price']} монет
+├ 🏷️ <b>Коллекция:</b> {listing['collection_name']}
+├ 🎯 <b>Рейтинг:</b> {int(listing['weight'])}
+├ 🔢 <b>Номер:</b> #{listing['serial_number']}
+└ 🆔 <b>ID:</b> <code>{listing['card_id']}</code>
+
+"""
+    
+    text += "</blockquote>"
+    
+    keyboard_buttons = []
+    
+    for i, listing in enumerate(page_listings, start=1):
+        keyboard_buttons.append([
+            InlineKeyboardButton(
+                text=f"#{i} {listing['player_name'][:12]}...", 
+                callback_data=f"view_listing_{listing['id']}"
+            )
+        ])
+    
+    nav_buttons = []
+    if current_page > 0:
+        nav_buttons.append(InlineKeyboardButton(text="◀️", callback_data="prev_listings_page"))
+    
+    if end_idx < len(listings):
+        nav_buttons.append(InlineKeyboardButton(text="▶️", callback_data="next_listings_page"))
+    
+    if nav_buttons:
+        keyboard_buttons.append(nav_buttons)
+    
+    keyboard_buttons.append([
+        InlineKeyboardButton(text="🔙 Назад", callback_data="market_menu")
+    ])
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
+    await callback.message.edit_text(text, reply_markup=keyboard)
+
+@router.callback_query(F.data.startswith("view_listing_"))
+async def view_listing_detail(callback: CallbackQuery, state: FSMContext):
+    listing_id = int(callback.data.split("_")[2])
+    
+    data = await state.get_data()
+    listings = data['my_listings']
+    listing = next((l for l in listings if l['id'] == listing_id), None)
+    
+    if not listing:
+        await callback.answer("Предложение не найдено", show_alert=True)
+        return
+    
+    text = f"""<b>📋 Мое предложение #{listing['id']}</b>
+
+<blockquote>👤 <b>{listing['player_name']}</b>
+{get_rarity_emoji(listing['rarity'])} <b>Редкость:</b> {listing['rarity'].capitalize()}
+🏷️ <b>Коллекция:</b> {listing['collection_name']}
+🎯 <b>Рейтинг:</b> {int(listing['weight'])}
+🔢 <b>Номер:</b> #{listing['serial_number']}
+🆔 <b>ID:</b> <code>{listing['card_id']}</code>
+💵 <b>Цена:</b> {listing['price']} монет
+📅 <b>Выставлено:</b> {listing['created_at'].strftime('%d.%m.%Y %H:%M')}
+</blockquote>"""
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✏️ Изменить цену", callback_data=f"edit_price_{listing['id']}")],
+        [InlineKeyboardButton(text="❌ Снять с продажи", callback_data=f"remove_listing_{listing['id']}")],
+        [InlineKeyboardButton(text="🔙 К списку", callback_data="market_my_listings")]
+    ])
+    
+    await callback.message.edit_text(text, reply_markup=keyboard)
+
+@router.callback_query(F.data.startswith("edit_price_"))
+async def edit_listing_price(callback: CallbackQuery, state: FSMContext):
+    listing_id = int(callback.data.split("_")[2])
+    await state.update_data(editing_listing_id=listing_id)
+    await state.set_state(MarketStates.editing_price)
+    
+    await callback.message.edit_text(
+        "Введите новую цену для этого предложения:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔙 Отмена", callback_data="market_my_listings")]
+        ])
+    )
+
+@router.message(MarketStates.editing_price)
+async def update_listing_price(message: Message, state: FSMContext):
     try:
+        new_price = int(message.text)
+        if new_price <= 0:
+            await message.answer("Цена должна быть положительным числом")
+            return
+            
         data = await state.get_data()
-        current_index = data['current_card_index']
-        card_infos = data['card_infos']
+        listing_id = data['editing_listing_id']
         
-        print(f"[{datetime.now()}] Навигация по картам: {callback.data}, текущий индекс: {current_index}")
+        await update_market_listing_price(listing_id, message.from_user.id, new_price)
         
-        if callback.data == "card_prev":
-            new_index = max(0, current_index - 1)
-        elif callback.data == "card_next":
-            new_index = min(len(card_infos) - 1, current_index + 1)
-        else:  # card_info
-            await callback.answer(f"Карта {current_index + 1} из {len(card_infos)}")
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🏪 Вернуться в маркет", callback_data="market_menu")]
+        ])
+        
+        await message.answer(
+            f"✅ Цена успешно изменена на {new_price} монет!",
+            reply_markup=keyboard
+        )
+        await state.clear()
+        
+    except ValueError:
+        await message.answer("Пожалуйста, введите корректное число")
+
+@router.callback_query(F.data.startswith("remove_listing_"))
+async def remove_listing(callback: CallbackQuery, state: FSMContext):
+    listing_id = int(callback.data.split("_")[2])
+    
+    await remove_market_listing(listing_id, callback.from_user.id)
+    await callback.answer("✅ Предложение снято с продажи", show_alert=True)
+    await show_my_listings(callback, state)
+
+# 3. Просмотр маркета - ИСПРАВЛЕННАЯ ВЕРСИЯ
+@router.callback_query(F.data == "market_browse")
+async def browse_market(callback: CallbackQuery, state: FSMContext):
+    await state.update_data(market_page=0, market_filter='all')
+    await show_market_page(callback, state)
+
+async def show_market_page(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    page = data.get('market_page', 0)
+    rarity_filter = data.get('market_filter', 'all')
+    
+    # Исключаем предложения текущего пользователя
+    listings = await get_market_listings(page, 5, rarity_filter, callback.from_user.id)
+    total_count = await get_total_market_listings_count(rarity_filter, callback.from_user.id)
+    
+    if not listings:
+        text = """<b>🎪 Футбольный Маркет</b>
+
+📊 На рынке пока нет предложений
+🎯 Будьте первым, кто выставит карточку!"""
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📤 Выставить карточку", callback_data="market_sell")],
+            [InlineKeyboardButton(text="🏠 В меню", callback_data="market_menu")]
+        ])
+        await callback.message.edit_text(text, reply_markup=keyboard)
+        return
+    
+    text = f"""<b>🎪 Футбольный Маркет</b>
+
+📊 Предложения: {page * 5 + 1}-{min((page + 1) * 5, total_count)} из {total_count}
+🎯 Фильтр: {get_rarity_display_name(rarity_filter)}
+
+<blockquote>"""
+    
+    for i, listing in enumerate(listings, start=1):
+        emoji = get_rarity_emoji(listing['rarity'])
+        text += f"""
+{emoji} <b>{listing['player_name']}</b>
+├ 💵 <b>Цена:</b> 🪙 {listing['price']:,}
+├ 👤 <b>Продавец:</b> {listing['seller_name']}
+├ 🏷️ <b>Коллекция:</b> {listing['collection_name']}
+├ 🎯 <b>Рейтинг:</b> {int(listing['weight'])}
+└ 🔢 <b>Номер:</b> #{listing['serial_number']}
+"""
+    
+    text += "</blockquote>"
+    
+    keyboard_buttons = []
+    
+    for i, listing in enumerate(listings, start=1):
+        keyboard_buttons.append([
+            InlineKeyboardButton(
+                text=f"🛒 Купить #{i} - 🪙 {listing['price']:,}", 
+                callback_data=f"buy_listing_{listing['id']}"
+            )
+        ])
+    
+    nav_buttons = []
+    if page > 0:
+        nav_buttons.append(InlineKeyboardButton(text="⏪", callback_data="market_prev"))
+    
+    if (page + 1) * 5 < total_count:
+        nav_buttons.append(InlineKeyboardButton(text="⏩", callback_data="market_next"))
+    
+    if nav_buttons:
+        keyboard_buttons.append(nav_buttons)
+    
+    filter_buttons = [
+        InlineKeyboardButton(text="⭐", callback_data="market_filter_all"),
+        InlineKeyboardButton(text="⚪", callback_data="market_filter_common"),
+        InlineKeyboardButton(text="🔵", callback_data="market_filter_rare"),
+        InlineKeyboardButton(text="🟣", callback_data="market_filter_epic"),
+        InlineKeyboardButton(text="🟡", callback_data="market_filter_legendary")
+    ]
+    keyboard_buttons.append(filter_buttons)
+    
+    action_buttons = [
+        InlineKeyboardButton(text="📤 Продать", callback_data="market_sell"),
+        InlineKeyboardButton(text="🏠 Меню", callback_data="market_menu")
+    ]
+    keyboard_buttons.append(action_buttons)
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
+    await callback.message.edit_text(text, reply_markup=keyboard)
+
+@router.callback_query(F.data == "market_history")
+async def market_history_start(callback: CallbackQuery, state: FSMContext):
+    await callback.message.edit_text(
+        """
+    📈 <b>История продаж</b>
+    
+    📝 Введите ID карточки для просмотра её истории продаж:
+    """,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔙 Назад", callback_data="market_menu")]
+        ])
+    )
+    await state.set_state(MarketStates.viewing_history)
+
+@router.message(MarketStates.viewing_history)
+async def show_sale_history(message: Message, state: FSMContext):
+    try:
+        card_id = int(message.text)
+        history = await get_sale_history(card_id)
+        
+        if not history:
+            await message.answer("""
+    📈 <b>История продаж</b>
+    
+    ❌ Для этой карточки нет истории продаж
+            """)
             return
         
-        await state.update_data(current_card_index=new_index)
+        text = f"""
+    📈 <b>История продаж карточки #{card_id}</b>
+    
+    📊 Всего сделок: {len(history)}
+    ━━━━━━━━━━━━━━━━━━━━━
+    """
         
-        # Удаляем текущее сообщение и показываем новое
-        try:
-            await callback.message.delete()
-        except Exception as e:
-            print(f"[{datetime.now()}] Не удалось удалить сообщение при навигации: {e}")
+        for i, sale in enumerate(history, start=1):
+            text += f"""
+    🎯 <b>Сделка #{i}</b>
+    ├ Дата: {sale['sold_at'].strftime('%d.%m.%Y %H:%M')}
+    ├ Цена: 🪙 {sale['price']:,}
+    ├ Продавец: 👤 {sale['seller_name'] or 'Unknown'}
+    └ Покупатель: 👤 {sale['buyer_name'] or 'Unknown'}
+    
+    """
         
-        await show_opened_card(callback, state)
-        await callback.answer()
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🏠 В меню", callback_data="market_menu")],
+            [InlineKeyboardButton(text="🔄 Проверить другую", callback_data="market_history")]
+        ])
         
-    except Exception as e:
-        print(f"[{datetime.now()}] ОШИБКА навигации по картам: {e}")
-        traceback.print_exc()
-        await callback.answer("❌ Ошибка навигации", show_alert=True)
+        await message.answer(text, reply_markup=keyboard)
+        await state.clear()
+        
+    except ValueError:
+        await message.answer("Пожалуйста, введите корректный ID карточки")
 
-@router.callback_query(F.data == "show_shop_packs")
-async def show_shop_packs_from_anywhere(callback: CallbackQuery, state: FSMContext):
-    """Обработка кнопки открытия магазина из любого состояния"""
-    user_id = callback.from_user.id
-    current_state = await state.get_state()
+@router.callback_query(F.data.startswith("buy_listing_"))
+async def confirm_purchase(callback: CallbackQuery, state: FSMContext):
+    listing_id = int(callback.data.split("_")[2])
     
-    print(f"[{datetime.now()}] Запрос магазина паков из состояния {current_state} для пользователя {user_id}")
+    # Получаем информацию об объявлении
+    listing = await get_market_listing_by_id(listing_id)
     
-    if current_state == PackStates.viewing_cards:
-        # Если мы в состоянии просмотра карт, используем специальный обработчик
-        await back_to_shop_from_cards(callback, state)
+    if not listing:
+        await callback.answer("❌ Объявление не найдено", show_alert=True)
+        return
+    
+    text = f"""<b>🛒 Подтверждение покупки</b>
+
+<blockquote>
+👤 <b>{listing['player_name']}</b>
+{get_rarity_emoji(listing['rarity'])} <b>Редкость:</b> {listing['rarity'].capitalize()}
+🏷️ <b>Коллекция:</b> {listing['collection_name']}
+🎯 <b>Рейтинг:</b> {int(listing['weight'])}
+🔢 <b>Номер:</b> #{listing['serial_number']}
+👤 <b>Продавец:</b> {listing['seller_name']}
+💵 <b>Цена:</b> {listing['price']} монет
+</blockquote>
+
+<b>Вы уверены, что хотите купить эту карточку?</b>"""
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="✅ Да, купить", callback_data=f"confirm_buy_{listing_id}"),
+            InlineKeyboardButton(text="❌ Отмена", callback_data="market_browse")
+        ]
+    ])
+    
+    await callback.message.edit_text(text, reply_markup=keyboard)
+
+@router.callback_query(F.data.startswith("confirm_buy_"))
+async def buy_listing(callback: CallbackQuery, state: FSMContext):
+    listing_id = int(callback.data.split("_")[2])
+    
+    success, message = await buy_market_listing(listing_id, callback.from_user.id)
+    
+    if success:
+        text = """<b>✅ Покупка успешна!</b>
+
+🎉 Карточка добавлена в вашу коллекцию
+📦 Средства списаны с баланса"""
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🃏 Мои карточки", callback_data="my_cards")],
+            [InlineKeyboardButton(text="🛒 К маркету", callback_data="market_browse")],
+            [InlineKeyboardButton(text="🏠 В меню", callback_data="market_menu")]
+        ])
+        await callback.message.edit_text(text, reply_markup=keyboard)
     else:
-        # Иначе используем обычный обработчик
-        await show_packs_menu(callback, state)
+        await callback.answer(f"❌ {message}", show_alert=True)
+        await browse_market(callback, state)
 
-@router.callback_query(F.data == "show_shop_packs", PackStates.viewing_cards)
-async def back_to_shop_from_cards(callback: CallbackQuery, state: FSMContext):
-    """Возврат в магазин паков из просмотра карт"""
-    user_id = callback.from_user.id
-    print(f"[{datetime.now()}] Возврат в магазин из просмотра карт для пользователя {user_id}")
+# 4. Поиск карточки по ID - ИСПРАВЛЕННАЯ ВЕРСИЯ
+@router.callback_query(F.data == "market_search")
+async def search_card_start(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(MarketStates.searching_card)
     
-    await state.set_state(PackStates.viewing_packs)
-    try:
-        # Удаляем сообщение с картой (если оно есть)
-        await callback.message.delete()
-    except Exception as e:
-        print(f"[{datetime.now()}] Не удалось удалить сообщение с картой: {e}")
-    
-    try:
-        # Отправляем новое сообщение с магазином
-        await show_packs_menu(callback, state)
-    except Exception as e:
-        print(f"[{datetime.now()}] ОШИБКА возврата в магазин: {e}")
-        await callback.answer("❌ Ошибка загрузки магазина", show_alert=True)
+    text = """<b>🔍 Поиск карточки на маркете</b>
 
-@router.callback_query(F.data == "back_to_menu", PackStates.viewing_cards)
-async def back_to_menu_from_cards(callback: CallbackQuery, state: FSMContext):
-    """Возврат в главное меню из просмотра карт"""
-    user_id = callback.from_user.id
-    print(f"[{datetime.now()}] Возврат в главное меню из просмотра карт для пользователя {user_id}")
+🎯 <i>Найдите нужную карточку по её уникальному ID</i>
+
+💡 <b>Как найти ID карточки?</b>
+• Попросите владельца карточки поделиться ID
+• ID отображается в информации о карточке
+• Это число, например: 123
+
+📝 <b>Введите ID карточки:</b>"""
     
-    await state.clear()
+    await callback.message.edit_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="market_menu")]
+        ])
+    )
+
+@router.message(MarketStates.searching_card)
+async def search_card_by_id(message: Message, state: FSMContext):
     try:
-        # Удаляем сообщение с картой
-        await callback.message.delete()
-    except Exception as e:
-        print(f"[{datetime.now()}] Не удалось удалить сообщение с картой: {e}")
+        card_id = int(message.text)
+        listing = await get_market_listing_by_user_card_id(card_id)
+        
+        if not listing:
+            await message.answer("""<b>❌ Карточка не найдена</b>
+
+Возможные причины:
+• Карточка уже продана
+• Карточка снята с продажи
+• Неверный ID карточки
+
+Проверьте ID и попробуйте снова""")
+            return
+        
+        text = f"""<b>✅ Карточка найдена!</b>
+
+<blockquote>
+👤 <b>{listing['player_name']}</b>
+{get_rarity_emoji(listing['rarity'])} <b>Редкость:</b> {listing['rarity'].capitalize()}
+🏷️ <b>Коллекция:</b> {listing['collection_name']}
+🎯 <b>Рейтинг:</b> {int(listing['weight'])}
+🔢 <b>Номер:</b> #{listing['serial_number']}
+👤 <b>Продавец:</b> {listing['seller_name']}
+💵 <b>Цена:</b> {listing['price']} монет
+📅 <b>Выставлено:</b> {listing['created_at'].strftime('%d.%m.%Y %H:%M')}
+</blockquote>"""
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[])
+        
+        if listing['user_id'] != message.from_user.id:
+            keyboard.inline_keyboard.append([
+                InlineKeyboardButton(text="🛒 Купить сейчас", callback_data=f"buy_listing_{listing['id']}")
+            ])
+        
+        keyboard.inline_keyboard.append([
+            InlineKeyboardButton(text="🔍 Новый поиск", callback_data="market_search"),
+            InlineKeyboardButton(text="🏠 В меню", callback_data="market_menu")
+        ])
+        
+        await message.answer(text, reply_markup=keyboard)
+        await state.clear()
+        
+    except ValueError:
+        await message.answer("""<b>❌ Неверный формат</b>
+
+Пожалуйста, введите <b>число</b> - ID карточки.
+
+Пример: 123 или 456""")
+
+# Вспомогательные функции
+def get_rarity_emoji(rarity: str) -> str:
+    emoji_map = {
+        'common': '⚪',
+        'rare': '🔵', 
+        'epic': '🟣',
+        'legendary': '🟡'
+    }
+    return emoji_map.get(rarity, '⚪')
+
+def get_rarity_display_name(rarity: str) -> str:
+    names = {
+        'all': 'Все',
+        'common': '⚪ Обычные',
+        'rare': '🔵 Редкие', 
+        'epic': '🟣 Эпические',
+        'legendary': '🟡 Легендарные'
+    }
+    return names.get(rarity, 'Все')
+
+# Обработчики навигации для списков
+@router.callback_query(F.data == "prev_cards_page")
+async def prev_cards_page(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    current_page = data['current_page']
+    if current_page > 0:
+        await state.update_data(current_page=current_page - 1)
+        await show_cards_list(callback, state)
+    else:
+        await callback.answer("Это первая страница")
+
+@router.callback_query(F.data == "next_cards_page")
+async def next_cards_page(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    available_cards = data['available_cards']
+    current_page = data['current_page']
     
-    try:
-        # Отправляем новое сообщение с меню
-        await show_menu(callback, state)
-    except Exception as e:
-        print(f"[{datetime.now()}] ОШИБКА возврата в меню: {e}")
-        await callback.answer("❌ Ошибка загрузки меню", show_alert=True)
+    if (current_page + 1) * 5 < len(available_cards):
+        await state.update_data(current_page=current_page + 1)
+        await show_cards_list(callback, state)
+    else:
+        await callback.answer("Это последняя страница")
+
+@router.callback_query(F.data == "prev_listings_page")
+async def prev_listings_page(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    current_page = data['current_page']
+    if current_page > 0:
+        await state.update_data(current_page=current_page - 1)
+        await show_listings_list(callback, state)
+    else:
+        await callback.answer("Это первая страница")
+
+@router.callback_query(F.data == "next_listings_page")
+async def next_listings_page(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    listings = data['my_listings']
+    current_page = data['current_page']
+    
+    if (current_page + 1) * 5 < len(listings):
+        await state.update_data(current_page=current_page + 1)
+        await show_listings_list(callback, state)
+    else:
+        await callback.answer("Это последняя страница")
+
+@router.callback_query(F.data == "market_prev")
+async def market_prev(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    page = data.get('market_page', 0)
+    if page > 0:
+        await state.update_data(market_page=page - 1)
+        await show_market_page(callback, state)
+    else:
+        await callback.answer("Это первая страница")
+
+@router.callback_query(F.data == "market_next")
+async def market_next(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    page = data.get('market_page', 0)
+    rarity_filter = data.get('market_filter', 'all')
+    total_count = await get_total_market_listings_count(rarity_filter)
+    
+    if (page + 1) * 5 < total_count:
+        await state.update_data(market_page=page + 1)
+        await show_market_page(callback, state)
+    else:
+        await callback.answer("Это последняя страница")
+
+# Обработчики фильтров
+@router.callback_query(F.data.startswith("market_filter_"))
+async def apply_market_filter(callback: CallbackQuery, state: FSMContext):
+    filter_type = callback.data.split("_")[2]
+    await state.update_data(market_filter=filter_type, market_page=0)
+    await show_market_page(callback, state)

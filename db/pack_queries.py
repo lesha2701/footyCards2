@@ -3,123 +3,59 @@ from typing import List, Dict, Any, Tuple
 import random
 import math
 
-# КОНФИГУРАЦИЯ СИСТЕМЫ ШАНСОВ (легко настраивается)
-class DropRateConfig:
-    # Базовые вероятности для разных типов паков (common, rare, epic, legendary)
-    PACK_RARITY_PROBABILITIES = {
-        'free': {
-            'common': 75,    # 75%
-            'rare': 22,      # 22% 
-            'epic': 2.5,     # 2.5%
-            'legendary': 0.5 # 0.5%
-        },
-        'premium': {
-            'common': 55,    # 55%
-            'rare': 35,      # 35%
-            'epic': 8,       # 8%
-            'legendary': 2   # 2%
-        },
-        'collection': {
-            'common': 40,    # 40%
-            'rare': 40,      # 40%
-            'epic': 15,      # 15%
-            'legendary': 5   # 5%
-        },
-        'event': {
-            'common': 30,    # 30%
-            'rare': 40,      # 40%
-            'epic': 20,      # 20%
-            'legendary': 10  # 10%
-        }
-    }
-    
-    # Модификаторы редкости внутри каждой категории
-    RARITY_TIERS = {
-        'common': {
-            'tier_1': {'weight': 0.6, 'modifier': 1.0},   # 60% - обычные common
-            'tier_2': {'weight': 0.3, 'modifier': 0.7},   # 30% - редкие common  
-            'tier_3': {'weight': 0.1, 'modifier': 0.4}    # 10% - очень редкие common
-        },
-        'rare': {
-            'tier_1': {'weight': 0.5, 'modifier': 1.0},   # 50% - обычные rare
-            'tier_2': {'weight': 0.3, 'modifier': 0.6},   # 30% - редкие rare
-            'tier_3': {'weight': 0.2, 'modifier': 0.3}    # 20% - очень редкие rare
-        },
-        'epic': {
-            'tier_1': {'weight': 0.4, 'modifier': 1.0},   # 40% - обычные epic
-            'tier_2': {'weight': 0.4, 'modifier': 0.5},   # 40% - редкие epic
-            'tier_3': {'weight': 0.2, 'modifier': 0.2}    # 20% - очень редкие epic
-        },
-        'legendary': {
-            'tier_1': {'weight': 0.3, 'modifier': 1.0},   # 30% - обычные legendary
-            'tier_2': {'weight': 0.4, 'modifier': 0.4},   # 40% - редкие legendary
-            'tier_3': {'weight': 0.3, 'modifier': 0.1}    # 30% - очень редкие legendary
-        }
-    }
-    
-    # Модификаторы на основе веса карты (чем выше вес, тем реже выпадение)
-    WEIGHT_MODIFIERS = {
-        'common': lambda w: 1.5 - w,    # Для common: вес 0.1 = множитель 1.4, вес 0.3 = множитель 1.2
-        'rare': lambda w: 1.4 - w,      # Для rare: вес 0.4 = множитель 1.0, вес 0.6 = множитель 0.8
-        'epic': lambda w: 1.3 - w,      # Для epic: вес 0.7 = множитель 0.6, вес 0.8 = множитель 0.5
-        'legendary': lambda w: 1.2 - w  # Для legendary: вес 0.9 = множитель 0.3, вес 1.0 = множитель 0.2
-    }
-    
-    # Гарантированные дропы (минимальное количество карт определенной редкости)
-    GUARANTEED_DROPS = {
-        'premium': {'rare': 1},      # В премиум паке гарантированно 1 rare+
-        'collection': {'rare': 1},   # В коллекционном паке гарантированно 1 rare+
-        'event': {'epic': 1}         # В ивентовом паке гарантированно 1 epic+
-    }
-    
-    # Бонусы за редкость (дополнительные шансы для редких карт)
-    RARITY_BONUS = {
-        'common': 1.0,
-        'rare': 1.2,
-        'epic': 1.5,
-        'legendary': 2.0
-    }
-
 async def generate_pack_cards(pack: Dict) -> List[Dict]:
     """Генерирует карты для пака на основе его настроек БЕЗ ДУБЛИКАТОВ"""
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         cards_count = pack['cards_amount']
+
+        print(pack)
+        common_chance = pack['common_chance']
+        rare_chance = pack['rare_chance']
+        epic_chance = pack['epic_chance']
+        legendary_chance = pack['legendary_chance']
+
+        print(common_chance, rare_chance, epic_chance, legendary_chance)
+
+        # Собираем все карты в список
+        selected_cards = []
         
-        # Определяем collection_id для коллекционных паков
-        collection_id = None
-        if isinstance(pack.get('id'), str) and pack['id'].startswith('collection_'):
-            collection_id = int(pack['id'].replace('collection_', ''))
-        elif pack.get('collection_id'):
-            collection_id = pack['collection_id']
-        
-        # Получаем все доступные карты
-        if collection_id:
-            query = """
-            SELECT * FROM cards 
-            WHERE collection_id = $1 
-            ORDER BY RANDOM()
-            LIMIT $2
-            """
-            available_cards = await conn.fetch(query, collection_id, cards_count)
-        else:
-            query = """
-            SELECT c.* FROM cards c
-            LEFT JOIN collections col ON c.collection_id = col.id
-            WHERE (col.id IS NULL OR col.cards_opened < col.total_cards)
-            ORDER BY RANDOM()
-            LIMIT $1
-            """
-            available_cards = await conn.fetch(query, cards_count)
-        
+        for i in range(cards_count):
+            number = random.randint(0, 99)
+            print(number)
+            
+            if number < common_chance:
+                card = await getCard(conn, 'common')  # Передаем connection и получаем карту
+                print("generate common")
+            elif number < common_chance + rare_chance:
+                card = await getCard(conn, 'rare')
+                print("generate rare")
+            elif number < common_chance + rare_chance + epic_chance:
+                card = await getCard(conn, 'epic')
+                print("generate epic")
+            else:
+                card = await getCard(conn, 'legendary')
+                print("generate legendary")
+            
+            # Добавляем карту в список, если она найдена
+            if card:
+                selected_cards.append(dict(card))
+
         # Если карт меньше чем нужно, возвращаем что есть
-        if len(available_cards) < cards_count:
-            print(f"Warning: Only {len(available_cards)} cards available, but need {cards_count}")
+        if len(selected_cards) < cards_count:
+            print(f"Warning: Only {len(selected_cards)} cards available, but need {cards_count}")
         
-        # Берем нужное количество карт
-        selected_cards = available_cards[:cards_count]
-        
-        return [dict(card) for card in selected_cards]
+        return selected_cards
+
+async def getCard(conn, rarity):
+    """Получает одну случайную карту указанной редкости"""
+    query = """
+    SELECT c.* FROM cards c
+    WHERE (c.rarity = $1)
+    ORDER BY RANDOM()
+    LIMIT 1
+    """
+    return await conn.fetchrow(query, rarity)
 
 def select_rarity(probabilities: Dict[str, float]) -> str:
     """Выбирает редкость на основе вероятностей"""
@@ -303,3 +239,24 @@ async def log_pack_opening(user_id: int, pack_id: int, card_ids: List[int]):
                 # Игнорируем ошибку дубликата, просто логируем
                 print(f"Duplicate card {card_id} in pack opening {pack_opening_id}, skipping")
                 continue
+
+async def update_user_score(user_id: int, score_to_add: int) -> Dict:
+    """Обновляет счет пользователя (добавляет очки)"""
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        query = """
+        UPDATE users 
+        SET score = score + $1 
+        WHERE user_id = $2 
+        RETURNING user_id, score
+        """
+        result = await conn.fetchrow(query, score_to_add, user_id)
+        return dict(result) if result else None
+    
+async def get_user_score(user_id: int) -> int:
+    """Получает текущий счет пользователя"""
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        query = "SELECT score FROM users WHERE user_id = $1"
+        result = await conn.fetchval(query, user_id)
+        return result or 0

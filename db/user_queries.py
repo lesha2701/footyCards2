@@ -241,7 +241,7 @@ async def get_user_market_listings(user_id: int):
         ORDER BY ml.created_at DESC
         """
         return await conn.fetch(query, user_id)
-
+    
 async def get_market_listings(page: int = 0, limit: int = 10, rarity: str = None, exclude_user_id: int = None):
     """Получает объявления с маркета с пагинацией и фильтрацией"""
     pool = await get_db_pool()
@@ -458,7 +458,7 @@ async def get_user_sale_history(user_id: int):
         return {
             'sales': [dict(row) for row in sales],
             'purchases': [dict(row) for row in purchases]
-        }   
+        }
     
     # Добавьте эту функцию в db/user_queries.py
 async def get_all_users():
@@ -472,3 +472,139 @@ async def get_all_users():
     except Exception as e:
         print(f"Ошибка при получении всех пользователей: {e}")
         return []
+    
+async def get_user_stats(user_id: int):
+    """Получает полную статистику пользователя"""
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        # Основная информация пользователя
+        user_query = """
+        SELECT username, balance, score, created_at 
+        FROM users 
+        WHERE user_id = $1
+        """
+        user_data = await conn.fetchrow(user_query, user_id)
+        
+        if not user_data:
+            return None
+        
+        # Количество карт
+        cards_query = "SELECT COUNT(*) FROM user_cards WHERE user_id = $1"
+        total_cards = await conn.fetchval(cards_query, user_id)
+        
+        # Количество уникальных карт
+        unique_cards_query = "SELECT COUNT(DISTINCT card_id) FROM user_cards WHERE user_id = $1"
+        unique_cards = await conn.fetchval(unique_cards_query, user_id)
+        
+        # Статистика тренировок
+        training_query = """
+        SELECT 
+            COUNT(*) as total_trainings,
+            COUNT(CASE WHEN success = true THEN 1 END) as successful_trainings,
+            COALESCE(SUM(reward_earned), 0) as training_rewards,
+            COALESCE(MAX(level), 1) as max_training_level
+        FROM training_results 
+        WHERE user_id = $1
+        """
+        training_stats = await conn.fetchrow(training_query, user_id)
+        
+        # Статистика игр
+        games_query = """
+        SELECT 
+            COUNT(*) as total_games,
+            COUNT(CASE WHEN result = 'win' THEN 1 END) as wins,
+            COUNT(CASE WHEN result = 'lose' THEN 1 END) as losses,
+            COUNT(CASE WHEN result = 'draw' THEN 1 END) as draws,
+            COALESCE(SUM(win_amount), 0) as total_winnings,
+            COALESCE(SUM(bet_amount), 0) as total_bets
+        FROM game_results 
+        WHERE user_id = $1
+        """
+        games_stats = await conn.fetchrow(games_query, user_id)
+        
+        # Любимые карты
+        favorites_query = "SELECT COUNT(*) FROM user_cards WHERE user_id = $1 AND is_favorite = true"
+        favorite_cards = await conn.fetchval(favorites_query, user_id)
+        
+        return {
+            'username': user_data['username'],
+            'balance': user_data['balance'],
+            'score': user_data['score'],
+            'created_at': user_data['created_at'],
+            'total_cards': total_cards or 0,
+            'unique_cards': unique_cards or 0,
+            'favorite_cards': favorite_cards or 0,
+            'total_trainings': training_stats['total_trainings'] or 0,
+            'successful_trainings': training_stats['successful_trainings'] or 0,
+            'training_rewards': training_stats['training_rewards'] or 0,
+            'max_training_level': training_stats['max_training_level'] or 1,
+            'total_games': games_stats['total_games'] or 0,
+            'wins': games_stats['wins'] or 0,
+            'losses': games_stats['losses'] or 0,
+            'draws': games_stats['draws'] or 0,
+            'total_winnings': games_stats['total_winnings'] or 0,
+            'total_bets': games_stats['total_bets'] or 0
+        }
+    
+async def get_leaderboard(user_id: int, limit: int = 10):
+    """Получает топ игроков по очкам и позицию текущего пользователя"""
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        # Получаем топ игроков
+        top_players_query = """
+        SELECT user_id, username, score, balance
+        FROM users 
+        WHERE score > 0
+        ORDER BY score DESC 
+        LIMIT $1
+        """
+        top_players = await conn.fetch(top_players_query, limit)
+        
+        # Получаем позицию текущего пользователя
+        user_position_query = """
+        SELECT position FROM (
+            SELECT user_id, ROW_NUMBER() OVER (ORDER BY score DESC) as position
+            FROM users 
+            WHERE score > 0
+        ) ranked 
+        WHERE user_id = $1
+        """
+        user_position = await conn.fetchval(user_position_query, user_id)
+        
+        # Получаем общее количество игроков с очками
+        total_players_query = "SELECT COUNT(*) FROM users WHERE score > 0"
+        total_players = await conn.fetchval(total_players_query)
+        
+        # Получаем данные текущего пользователя
+        user_data_query = "SELECT username, score FROM users WHERE user_id = $1"
+        user_data = await conn.fetchrow(user_data_query, user_id)
+        
+        return {
+            'top_players': [dict(player) for player in top_players],
+            'user_position': user_position,
+            'total_players': total_players,
+            'current_user': dict(user_data) if user_data else None
+        }
+    
+async def get_collections_info():
+    """Получает информацию о всех коллекциях"""
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        query = """
+        SELECT 
+            id,
+            name,
+            description,
+            total_cards,
+            cards_opened,
+            start_date,
+            end_date,
+            is_active
+        FROM collections 
+        ORDER BY 
+            is_active DESC,
+            end_date DESC NULLS LAST,
+            start_date DESC
+        """
+        collections = await conn.fetch(query)
+        return [dict(collection) for collection in collections]
