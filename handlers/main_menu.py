@@ -12,9 +12,9 @@ router = Router()
 
 # Конфигурация каналов для подписки
 CHANNELS_CONFIG = {
-    -1002655732796: {  # ID канала 1
-        'name': '📢 Футбольные новости',
-        'url': 'https://t.me/RonaldoOrMessiQuest'
+    -1002216462966: {  # ID канала 1
+        'name': '📢 HXH',
+        'url': 'https://t.me/HXHFTBL'
     },
     -1002459798852: {  # ID канала 2
         'name': '🎮 Основной канал', 
@@ -100,6 +100,8 @@ async def show_menu(message: Message | CallbackQuery, state: FSMContext):
             [InlineKeyboardButton(text="⚔️ Игровые режимы", callback_data="play_menu")],
             [InlineKeyboardButton(text="🏪 Маркет", callback_data="market_menu")],
             [InlineKeyboardButton(text="🃏 Мои карты", callback_data="my_cards")],
+            [InlineKeyboardButton(text="👤 Мой профиль", callback_data="profile")],
+            [InlineKeyboardButton(text="👥 Пригласить друзей", callback_data="referral_system")],
             [InlineKeyboardButton(text="🏆 Рейтинг игроков", callback_data="show_leaderboard")],
             [InlineKeyboardButton(text="📚 Коллекции", callback_data="show_collections")],  # Новая кнопка
             [InlineKeyboardButton(text="💎 Пополнить баланс", callback_data="donate_menu")]
@@ -127,6 +129,8 @@ async def show_menu(message: Message | CallbackQuery, state: FSMContext):
             [InlineKeyboardButton(text="⚔️ Игровые режимы", callback_data="play_menu")],
             [InlineKeyboardButton(text="🏪 Маркет", callback_data="market_menu")],
             [InlineKeyboardButton(text="🃏 Мои карты", callback_data="my_cards")],
+            [InlineKeyboardButton(text="👤 Мой профиль", callback_data="profile")],
+            [InlineKeyboardButton(text="👥 Пригласить друзей", callback_data="referral_system")],
             [InlineKeyboardButton(text="🏆 Рейтинг игроков", callback_data="show_leaderboard")],
             [InlineKeyboardButton(text="📚 Коллекции", callback_data="show_collections")],  # Новая кнопка
             [InlineKeyboardButton(text="💎 Пополнить баланс", callback_data="donate_menu")]
@@ -176,7 +180,7 @@ async def play_menu(callback: CallbackQuery, state: FSMContext, bot: Bot):
         [InlineKeyboardButton(text="🎲 Футбольные кости", callback_data="open_footballDice")],
         [InlineKeyboardButton(text="🃏 Блэк Джек", callback_data="open_football21")],
         [InlineKeyboardButton(text="🎰 Слот-машина", callback_data="open_slots")],
-        [InlineKeyboardButton(text="🎯 Футбольная рулетка", callback_data="open_roulette")],
+        # [InlineKeyboardButton(text="🎯 Футбольная рулетка", callback_data="open_roulette")],
         [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_menu")]
     ])
 
@@ -195,7 +199,7 @@ async def check_subscription_handler(callback: CallbackQuery, state: FSMContext,
             [InlineKeyboardButton(text="🎲 Футбольные кости", callback_data="open_footballDice")],
             [InlineKeyboardButton(text="🃏 Блэк Джек", callback_data="open_football21")],
             [InlineKeyboardButton(text="🎰 Слот-машина", callback_data="open_slots")],
-            [InlineKeyboardButton(text="🎯 Футбольная рулетка", callback_data="open_roulette")],
+            # [InlineKeyboardButton(text="🎯 Футбольная рулетка", callback_data="open_roulette")],
             [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_menu")]
         ])
         
@@ -252,8 +256,6 @@ async def create_compact_stats_display(stats) -> str:
         f"💰 <b>{stats['balance']:,}</b> | "
         f"⭐ <b>{stats['score']:,}</b> | "
         f"🃏 <b>{stats['total_cards']:,}</b>\n"
-        f"🎮 WR: <b>{win_rate:.1f}%</b> | "
-        f"💪 Eff: <b>{training_success_rate:.1f}%</b>\n"
     )
 
 @router.callback_query(F.data == "show_leaderboard")

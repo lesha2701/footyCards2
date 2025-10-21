@@ -481,6 +481,8 @@ async def open_pack(callback: CallbackQuery, state: FSMContext, pack_id: int):
             print(f"[{datetime.now()}] Списано {pack['cost']} монет с пользователя {user_id}")
         else:
             await update_last_pack_time(user_id)
+            await reset_notification_record(user_id)
+            print(f"[{datetime.now()}] Пользователь {user_id} открыл бесплатный пак - уведомления сброшены")
             print(f"[{datetime.now()}] Обновлено время открытия бесплатного пака для пользователя {user_id}")
         
         # Генерация карт

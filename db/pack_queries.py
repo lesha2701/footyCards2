@@ -2,6 +2,7 @@ from db.pool import get_db_pool
 from typing import List, Dict, Any, Tuple
 import random
 import math
+from datetime import datetime, timedelta
 
 async def generate_pack_cards(pack: Dict) -> List[Dict]:
     """Генерирует карты для пака на основе его настроек БЕЗ ДУБЛИКАТОВ"""
@@ -19,39 +20,68 @@ async def generate_pack_cards(pack: Dict) -> List[Dict]:
 
         # Собираем все карты в список
         selected_cards = []
+        used_card_ids = set()  # Для отслеживания уже выбранных карт в этом паке
+        max_attempts_per_card = 10  # Максимальное количество попыток найти уникальную карту
         
         for i in range(cards_count):
             number = random.randint(0, 99)
-            print(number)
+            print(f"Генерация карты {i+1}, число: {number}")
             
-            if number < common_chance:
-                card = await getCard(conn, 'common')  # Передаем connection и получаем карту
-                print("generate common")
-            elif number < common_chance + rare_chance:
-                card = await getCard(conn, 'rare')
-                print("generate rare")
-            elif number < common_chance + rare_chance + epic_chance:
-                card = await getCard(conn, 'epic')
-                print("generate epic")
-            else:
-                card = await getCard(conn, 'legendary')
-                print("generate legendary")
+            card = None
+            attempts = 0
             
-            # Добавляем карту в список, если она найдена
-            if card:
+            # Пытаемся найти уникальную карту
+            while card is None and attempts < max_attempts_per_card:
+                if number < common_chance:
+                    card = await getCard(conn, 'common')
+                    print("попытка генерации common")
+                elif number < common_chance + rare_chance:
+                    card = await getCard(conn, 'rare')
+                    print("попытка генерации rare")
+                elif number < common_chance + rare_chance + epic_chance:
+                    card = await getCard(conn, 'epic')
+                    print("попытка генерации epic")
+                else:
+                    card = await getCard(conn, 'legendary')
+                    print("попытка генерации legendary")
+                
+                # Проверяем что карта найдена и не дублируется
+                if card and card['id'] in used_card_ids:
+                    print(f"Найдена дублирующаяся карта {card['id']}, пробуем снова")
+                    card = None  # Сбрасываем карту и пробуем снова
+                    attempts += 1
+                    # Меняем число для следующей попытки чтобы попробовать другую редкость
+                    number = (number + random.randint(1, 10)) % 100
+                elif card:
+                    # Уникальная карта найдена
+                    break
+                else:
+                    # Карта не найдена, пробуем с другим числом
+                    attempts += 1
+                    number = (number + random.randint(1, 10)) % 100
+            
+            # Добавляем карту в список, если она найдена и уникальна
+            if card and card['id'] not in used_card_ids:
                 selected_cards.append(dict(card))
+                used_card_ids.add(card['id'])
+                print(f"Успешно добавлена карта {card['id']} ({card['rarity']})")
+            else:
+                print(f"Не удалось найти уникальную карту для слота {i+1}")
 
         # Если карт меньше чем нужно, возвращаем что есть
         if len(selected_cards) < cards_count:
-            print(f"Warning: Only {len(selected_cards)} cards available, but need {cards_count}")
+            print(f"Warning: Only {len(selected_cards)} unique cards available, but need {cards_count}")
         
+        print(f"Итоговый набор карт: {[card['id'] for card in selected_cards]}")
         return selected_cards
 
 async def getCard(conn, rarity):
-    """Получает одну случайную карту указанной редкости"""
+    """Получает одну случайную карту указанной редкости из активных коллекций"""
     query = """
     SELECT c.* FROM cards c
-    WHERE (c.rarity = $1)
+    LEFT JOIN collections col ON c.collection_id = col.id
+    WHERE c.rarity = $1 
+    AND (c.collection_id IS NULL OR (col.is_active = true AND col.cards_opened < col.total_cards))
     ORDER BY RANDOM()
     LIMIT 1
     """
@@ -112,7 +142,6 @@ async def get_available_packs(user_id: int) -> List[Dict]:
         all_packs = [dict(pack) for pack in base_packs] + [dict(pack) for pack in collection_packs]
         return all_packs
 
-
 async def get_pack_by_id(pack_id) -> Dict:
     """Получает пак по ID (обрабатывает как числовые, так и строковые ID коллекций)"""
     pool = await get_db_pool()
@@ -139,7 +168,7 @@ async def get_pack_by_id(pack_id) -> Dict:
                 WHERE c.id = $1 
                 AND c.is_active = true 
                 AND c.end_date > NOW()
-                AND c.cards_opened < c.total_cards
+                AND c.cards_opened < c.total_cards  -- Важно: проверяем что еще есть доступные карты
             """, int(collection_id))
         else:
             # Это обычный пак
@@ -172,7 +201,7 @@ async def get_collection_name(collection_id: int) -> str:
         return await conn.fetchval(query, collection_id)
 
 async def update_collection_stats_by_cards(card_ids: List[int]) -> int:
-    """Обновляет статистику коллекций на основе выпавших карт"""
+    """Обновляет статистику коллекций на основе выпавших карт и деактивирует исчерпанные коллекции"""
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         # Получаем collection_id всех выпавших карт
@@ -197,13 +226,21 @@ async def update_collection_stats_by_cards(card_ids: List[int]) -> int:
             # Обновляем статистику коллекции (не превышая лимит)
             update_query = """
             UPDATE collections 
-            SET cards_opened = LEAST(cards_opened + $2, total_cards)
+            SET 
+                cards_opened = LEAST(cards_opened + $2, total_cards),
+                is_active = CASE 
+                    WHEN cards_opened + $2 >= total_cards THEN false 
+                    ELSE is_active 
+                END
             WHERE id = $1 
-            RETURNING id
+            RETURNING id, cards_opened, total_cards, is_active
             """
-            result = await conn.fetchval(update_query, collection_id, cards_count)
+            result = await conn.fetchrow(update_query, collection_id, cards_count)
             if result:
                 updated_count += 1
+                # Логируем если коллекция была деактивирована
+                if not result['is_active'] and result['cards_opened'] >= result['total_cards']:
+                    print(f"[{datetime.now()}] Коллекция {collection_id} исчерпана и деактивирована. Выпало: {result['cards_opened']}/{result['total_cards']}")
         
         return updated_count
 

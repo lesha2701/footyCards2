@@ -190,3 +190,24 @@ async def get_player_info(player_id: int):
             "SELECT * FROM players WHERE id = $1",
             player_id
         )
+    
+async def add_card_to_user(user_id: int, card_id: int):
+    """Добавляет одну карточку пользователю и возвращает user_card"""
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        # Получаем следующий серийный номер для этой карточки
+        serial_query = """
+        SELECT COALESCE(MAX(serial_number), 0) + 1 
+        FROM user_cards 
+        WHERE card_id = $1
+        """
+        serial_number = await conn.fetchval(serial_query, card_id)
+        
+        # Добавляем карточку пользователю
+        query = """
+        INSERT INTO user_cards (user_id, card_id, serial_number, obtained_at)
+        VALUES ($1, $2, $3, NOW())
+        RETURNING *
+        """
+        result = await conn.fetchrow(query, user_id, card_id, serial_number)
+        return dict(result) if result else None

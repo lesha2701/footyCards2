@@ -45,6 +45,17 @@ async def market_menu(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "market_sell")
 async def market_sell_start(callback: CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
+    
+    # Проверяем количество активных объявлений
+    active_listings_count = await get_user_active_listings_count(user_id)
+    if active_listings_count >= 5:
+        await callback.answer(
+            "❌ У вас уже 5 активных объявлений!\n"
+            "Снимите одно из объявлений, чтобы выставить новое.",
+            show_alert=True
+        )
+        return
+    
     user_cards = await get_user_cards_for_market(user_id)
     
     if not user_cards:
@@ -66,6 +77,10 @@ async def show_cards_list(callback: CallbackQuery, state: FSMContext):
     current_page = data['current_page']
     filter_rarity = data.get('filter_rarity', 'all')
     
+    # Получаем количество активных объявлений
+    user_id = callback.from_user.id
+    active_listings_count = await get_user_active_listings_count(user_id)
+    
     # Фильтрация по редкости
     if filter_rarity != 'all':
         filtered_cards = [card for card in available_cards if card['rarity'] == filter_rarity]
@@ -82,6 +97,7 @@ async def show_cards_list(callback: CallbackQuery, state: FSMContext):
     
     text = f"""<b>🎴 Выбор карточки для продажи</b>
 
+📊 Активных объявлений: {active_listings_count}/5
 📄 Страница {current_page + 1}/{(len(filtered_cards) - 1) // 5 + 1}
 🎯 Фильтр: {get_rarity_display_name(filter_rarity)}
 
@@ -180,7 +196,6 @@ async def show_my_deals(callback: CallbackQuery, state: FSMContext):
         text += "\n\n📭 <i>У вас еще не было покупок</i>"
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔄 Обновить", callback_data="market_my_deals")],
         [InlineKeyboardButton(text="🏠 В меню", callback_data="market_menu")]
     ])
     
@@ -216,7 +231,8 @@ async def select_card_for_sale(callback: CallbackQuery, state: FSMContext):
 └ ID: <code>{card['user_card_id']}</code>
 </blockquote>
 
-💵 Введите цену продажи:"""
+💵 Введите цену продажи:
+⚠️ <i>Максимальная цена: 200,000 монет</i>"""
             
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="🔙 Отмена", callback_data="market_sell")]
@@ -234,6 +250,11 @@ async def set_card_price(message: Message, state: FSMContext):
         price = int(message.text)
         if price <= 0:
             await message.answer("❌ Цена должна быть положительным числом")
+            return
+        
+        # Добавляем проверку максимальной цены
+        if price > 200000:
+            await message.answer("❌ Максимальная цена для продажи - 200,000 монет")
             return
             
         data = await state.get_data()
@@ -377,7 +398,8 @@ async def edit_listing_price(callback: CallbackQuery, state: FSMContext):
     await state.set_state(MarketStates.editing_price)
     
     await callback.message.edit_text(
-        "Введите новую цену для этого предложения:",
+        "💵 Введите новую цену для этого предложения:\n"
+        "⚠️ <i>Максимальная цена: 200,000 монет</i>",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🔙 Отмена", callback_data="market_my_listings")]
         ])
@@ -388,7 +410,12 @@ async def update_listing_price(message: Message, state: FSMContext):
     try:
         new_price = int(message.text)
         if new_price <= 0:
-            await message.answer("Цена должна быть положительным числом")
+            await message.answer("❌ Цена должна быть положительным числом")
+            return
+        
+        # Добавляем проверку максимальной цены
+        if new_price > 200000:
+            await message.answer("❌ Максимальная цена для продажи - 200,000 монет")
             return
             
         data = await state.get_data()

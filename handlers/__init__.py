@@ -13,6 +13,9 @@ def setup_message_routers() -> Router:
     from . import donate
     from . import football_roulette
     from . import football_training
+    from . import referral_system
+    from . import album
+    from . import profile
 
     router = Router()
     router.include_router(start.router)
@@ -26,4 +29,8 @@ def setup_message_routers() -> Router:
     router.include_router(donate.router)
     router.include_router(football_roulette.router)
     router.include_router(football_training.router)
+    router.include_router(referral_system.router)
+    router.include_router(album.router)
+    router.include_router(profile.router)
+    
     return router

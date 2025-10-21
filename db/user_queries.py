@@ -157,12 +157,26 @@ async def create_market_listing(user_id: int, user_card_id: int, price: int):
     """Создает объявление о продаже карточки на маркете"""
     pool = await get_db_pool()
     async with pool.acquire() as conn:
-        # Проверяем, не выставлена ли уже карточка
-        existing_query = "SELECT id FROM market_listings WHERE card_id = $1 AND is_sold = FALSE"
-        existing = await conn.fetchval(existing_query, user_card_id)
+        # Проверяем, не выставлена ли уже эта карточка пользователем
+        existing_query = """
+        SELECT id FROM market_listings 
+        WHERE card_id = $1 AND is_sold = FALSE AND user_id = $2
+        """
+        existing = await conn.fetchval(existing_query, user_card_id, user_id)
         
         if existing:
-            return None
+            return None, "Эта карточка уже выставлена вами на продажу"
+        
+        # Дополнительная проверка: не выставлена ли карточка кем-то другим
+        # (хотя это маловероятно, так как карточка принадлежит пользователю)
+        existing_global_query = """
+        SELECT id FROM market_listings 
+        WHERE card_id = $1 AND is_sold = FALSE
+        """
+        existing_global = await conn.fetchval(existing_global_query, user_card_id)
+        
+        if existing_global:
+            return None, "Эта карточка уже выставлена на продажу другим пользователем"
             
         query = """
         INSERT INTO market_listings (user_id, card_id, price, created_at)
@@ -170,10 +184,11 @@ async def create_market_listing(user_id: int, user_card_id: int, price: int):
         RETURNING id
         """
         try:
-            return await conn.fetchval(query, user_id, user_card_id, price)
+            listing_id = await conn.fetchval(query, user_id, user_card_id, price)
+            return listing_id, "Объявление успешно создано"
         except Exception as e:
             print(f"Error creating market listing: {e}")
-            return None
+            return None, f"Ошибка при создании объявления: {e}"
         
 async def record_sale_history(user_card_id: int, seller_id: int, buyer_id: int, price: int):
     """Записывает историю продажи карточки"""
@@ -608,3 +623,579 @@ async def get_collections_info():
         """
         collections = await conn.fetch(query)
         return [dict(collection) for collection in collections]
+
+# Добавим в db/user_queries.py
+
+async def get_user_active_listings_count(user_id: int) -> int:
+    """Получает количество активных объявлений пользователя"""
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        query = """
+        SELECT COUNT(*) 
+        FROM market_listings 
+        WHERE user_id = $1 AND is_sold = FALSE
+        """
+        return await conn.fetchval(query, user_id)
+
+async def get_average_card_price(card_base_id: int) -> float:
+    """Получает среднюю цену карточки по истории продаж"""
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        query = """
+        SELECT ROUND(AVG(price)) as avg_price
+        FROM market_sales_history msh
+        JOIN user_cards uc ON msh.user_card_id = uc.id
+        WHERE uc.card_id = $1
+        AND msh.sold_at >= NOW() - INTERVAL '30 days'  -- Только за последние 30 дней
+        """
+        result = await conn.fetchval(query, card_base_id)
+        return result if result else None
+
+async def get_card_market_stats(card_base_id: int) -> dict:
+    """Получает полную статистику по карточке на рынке"""
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        query = """
+        SELECT 
+            COUNT(*) as total_sales,
+            ROUND(AVG(price)) as avg_price,
+            MIN(price) as min_price,
+            MAX(price) as max_price,
+            COUNT(DISTINCT seller_id) as unique_sellers
+        FROM market_sales_history msh
+        JOIN user_cards uc ON msh.user_card_id = uc.id
+        WHERE uc.card_id = $1
+        AND msh.sold_at >= NOW() - INTERVAL '30 days'
+        """
+        return await conn.fetchrow(query, card_base_id)
+    
+    # Реферальные запросы
+async def create_referral(referrer_id: int, referred_id: int):
+    """Создает реферальную связь"""
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        query = """
+        INSERT INTO referrals (referrer_id, referred_id) 
+        VALUES ($1, $2)
+        RETURNING *
+        """
+        try:
+            return await conn.fetchrow(query, referrer_id, referred_id)
+        except Exception as e:
+            print(f"Ошибка создания реферальной связи: {e}")
+            return None
+
+async def get_referral_by_referred(referred_id: int):
+    """Получает реферальную связь по приглашенному пользователю"""
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        query = "SELECT * FROM referrals WHERE referred_id = $1"
+        return await conn.fetchrow(query, referred_id)
+
+async def get_user_referrals(referrer_id: int):
+    """Получает всех приглашенных пользователей"""
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        query = """
+        SELECT r.*, u.username, u.created_at as user_created
+        FROM referrals r
+        LEFT JOIN users u ON r.referred_id = u.user_id
+        WHERE r.referrer_id = $1
+        ORDER BY r.created_at DESC
+        """
+        return await conn.fetch(query, referrer_id)
+
+async def verify_referral(referred_id: int):
+    """Помечает реферал как верифицированный (выполнил условия)"""
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        query = """
+        UPDATE referrals 
+        SET is_verified = TRUE, verified_at = NOW() 
+        WHERE referred_id = $1 AND is_verified = FALSE
+        RETURNING *
+        """
+        return await conn.fetchrow(query, referred_id)
+
+async def mark_reward_given(referred_id: int, reward_amount: int):
+    """Помечает что награда была выдана"""
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        query = """
+        UPDATE referrals 
+        SET reward_given = TRUE, reward_amount = $2 
+        WHERE referred_id = $1 AND reward_given = FALSE
+        RETURNING *
+        """
+        return await conn.fetchrow(query, referred_id, reward_amount)
+
+async def get_referral_stats(referrer_id: int):
+    """Получает статистику по рефералам"""
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        query = """
+        SELECT 
+            COUNT(*) as total_referrals,
+            COUNT(CASE WHEN is_verified = TRUE THEN 1 END) as verified_referrals,
+            COUNT(CASE WHEN reward_given = TRUE THEN 1 END) as rewarded_referrals,
+            COALESCE(SUM(reward_amount), 0) as total_rewards_earned
+        FROM referrals 
+        WHERE referrer_id = $1
+        """
+        return await conn.fetchrow(query, referrer_id)
+
+async def check_user_activity_requirements(user_id: int):
+    """Проверяет выполнил ли пользователь условия для верификации реферала"""
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        # Проверяем есть ли хотя бы одна карта и одна тренировка
+        query = """
+        SELECT 
+            EXISTS(SELECT 1 FROM user_cards WHERE user_id = $1 LIMIT 1) as has_cards,
+            EXISTS(SELECT 1 FROM training_results WHERE user_id = $1 LIMIT 1) as has_trainings
+        """
+        result = await conn.fetchrow(query, user_id)
+        return result['has_cards'] and result['has_trainings']
+    
+
+# Запросы для уведомлений о бесплатных паках
+async def get_or_create_notification_record(user_id: int):
+    """Получает или создает запись об уведомлениях для пользователя"""
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        query = """
+        INSERT INTO free_pack_notifications (user_id) 
+        VALUES ($1)
+        ON CONFLICT (user_id) 
+        DO UPDATE SET updated_at = NOW()
+        RETURNING *
+        """
+        return await conn.fetchrow(query, user_id)
+
+async def update_notification_sent_time(user_id: int):
+    """Обновляет время последнего отправленного уведомления"""
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        query = """
+        UPDATE free_pack_notifications 
+        SET last_notification_sent = NOW(), 
+            notifications_count = notifications_count + 1,
+            updated_at = NOW()
+        WHERE user_id = $1
+        RETURNING *
+        """
+        return await conn.fetchrow(query, user_id)
+
+async def get_notification_record(user_id: int):
+    """Получает запись об уведомлениях пользователя"""
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        query = "SELECT * FROM free_pack_notifications WHERE user_id = $1"
+        return await conn.fetchrow(query, user_id)
+
+async def reset_notification_record(user_id: int):
+    """Сбрасывает запись об уведомлениях (при открытии бесплатного пака)"""
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        query = """
+        UPDATE free_pack_notifications 
+        SET last_notification_sent = NULL,
+            updated_at = NOW()
+        WHERE user_id = $1
+        """
+        await conn.execute(query, user_id)
+
+async def get_users_with_available_free_packs():
+    """Получает пользователей, у которых доступен бесплатный пак"""
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        query = """
+        SELECT 
+            u.user_id,
+            u.last_free_pack,
+            fpn.last_notification_sent,
+            fpn.notifications_count
+        FROM users u
+        LEFT JOIN free_pack_notifications fpn ON u.user_id = fpn.user_id
+        WHERE u.last_free_pack IS NULL 
+           OR (u.last_free_pack IS NOT NULL 
+               AND EXTRACT(EPOCH FROM (NOW() - u.last_free_pack)) >= 10800) -- 3 часа в секундах
+        """
+        return await conn.fetch(query)
+    
+async def get_chat_pack_status(user_id: int):
+    """Получает статус открытия паков в чатах для пользователя (глобальный)"""
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        query = """
+        SELECT * FROM chat_pack_openings 
+        WHERE user_id = $1
+        """
+        result = await conn.fetchrow(query, user_id)
+        return dict(result) if result else None
+
+async def create_chat_pack_record(user_id: int, chat_id: int):
+    """Создает запись об открытии паков в чате"""
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        query = """
+        INSERT INTO chat_pack_openings (user_id, chat_id, opened_at, next_available_at, total_opened)
+        VALUES ($1, $2, NOW(), NOW(), 0)
+        RETURNING *
+        """
+        result = await conn.fetchrow(query, user_id, chat_id)
+        return dict(result)
+
+async def update_chat_pack_opening(user_id: int):
+    """Обновляет запись после открытия пака"""
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        query = """
+        UPDATE chat_pack_openings 
+        SET 
+            last_opened_at = NOW(),
+            next_available_at = NOW() + INTERVAL '3 hours',
+            total_opened = total_opened + 1
+        WHERE user_id = $1
+        RETURNING *
+        """
+        result = await conn.fetchrow(query, user_id)
+        return dict(result) if result else None
+
+async def can_open_chat_pack(user_id: int):
+    """Проверяет, может ли пользователь открыть пак в любом чате (глобальная проверка)"""
+    pack_status = await get_chat_pack_status(user_id)
+    
+    if not pack_status:
+        return True, "first_time"
+    
+    # Используем UTC время для сравнения
+    now = datetime.now(timezone.utc)
+    next_available = pack_status['next_available_at']
+    
+    # Если next_available без часового пояса, добавляем UTC
+    if next_available.tzinfo is None:
+        next_available = next_available.replace(tzinfo=timezone.utc)
+    else:
+        # Если уже с часовым поясом, конвертируем в UTC для единообразия
+        next_available = next_available.astimezone(timezone.utc)
+    
+    print(f"DEBUG: user_id={user_id}, now={now}, next_available={next_available}, can_open={now >= next_available}")
+    
+    if now >= next_available:
+        return True, "available"
+    else:
+        # Вычисляем оставшееся время
+        remaining = next_available - now
+        hours = int(remaining.total_seconds() // 3600)
+        minutes = int((remaining.total_seconds() % 3600) // 60)
+        return False, f"{hours:02d}:{minutes:02d}"
+    
+async def create_chat_pack_record_with_cooldown(user_id: int):
+    """Создает запись об открытии паков с установленным cooldown"""
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        query = """
+        INSERT INTO chat_pack_openings (user_id, last_opened_at, next_available_at, total_opened)
+        VALUES ($1, NOW(), NOW() + INTERVAL '3 hours', 1)
+        RETURNING *
+        """
+        result = await conn.fetchrow(query, user_id)
+        return dict(result)
+    
+async def get_chat_pack_stats():
+    """Получает общую статистику открытий паков во всех чатах"""
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        query = """
+        SELECT 
+            COUNT(*) as total_users,
+            COALESCE(SUM(total_opened), 0) as total_opened,
+            MAX(last_opened_at) as last_opened
+        FROM chat_pack_openings
+        """
+        result = await conn.fetchrow(query)
+        return dict(result) if result else {'total_users': 0, 'total_opened': 0, 'last_opened': None}
+    
+async def get_user_collections_progress(user_id: int):
+    """Получает прогресс пользователя по всем коллекциям"""
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        query = """
+        SELECT 
+            c.id,
+            c.name,
+            c.description,
+            c.total_cards,
+            c.is_active,
+            c.badge_emoji,
+            c.badge_name,
+            COUNT(DISTINCT uc.card_id) as user_cards_count,
+            EXISTS(
+                SELECT 1 FROM collection_rewards cr 
+                WHERE cr.collection_id = c.id AND cr.user_id = $1
+            ) as reward_claimed,
+            (SELECT COUNT(*) FROM cards WHERE collection_id = c.id) as actual_cards_count
+        FROM collections c
+        LEFT JOIN cards card ON c.id = card.collection_id
+        LEFT JOIN user_cards uc ON card.id = uc.card_id AND uc.user_id = $1
+        GROUP BY c.id
+        ORDER BY c.is_active DESC, c.end_date DESC NULLS LAST, c.start_date DESC
+        """
+        return await conn.fetch(query, user_id)
+    
+async def get_collection_with_badge(collection_id: int):
+    """Получает информацию о коллекции со значком"""
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        query = """
+        SELECT 
+            id, name, description, badge_emoji, badge_name
+        FROM collections 
+        WHERE id = $1
+        """
+        return await conn.fetchrow(query, collection_id)
+
+async def get_collection_cards_with_user_progress(collection_id: int, user_id: int):
+    """Получает все карты коллекции с отметкой о наличии у пользователя"""
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        query = """
+        SELECT 
+            card.id,
+            card.player_name,
+            card.rarity,
+            card.uniq_name,
+            card.weight,
+            EXISTS(
+                SELECT 1 FROM user_cards uc 
+                WHERE uc.card_id = card.id AND uc.user_id = $2
+            ) as user_has_card,
+            COUNT(uc.id) as copies_count
+        FROM cards card
+        LEFT JOIN user_cards uc ON card.id = uc.card_id AND uc.user_id = $2
+        WHERE card.collection_id = $1
+        GROUP BY card.id
+        ORDER BY 
+            CASE card.rarity
+                WHEN 'legendary' THEN 1
+                WHEN 'epic' THEN 2
+                WHEN 'rare' THEN 3
+                WHEN 'common' THEN 4
+            END,
+            card.player_name
+        """
+        return await conn.fetch(query, collection_id, user_id)
+
+async def claim_collection_reward(user_id: int, collection_id: int, reward_amount: int):
+    """Записывает факт получения награды за коллекцию"""
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        query = """
+        INSERT INTO collection_rewards (user_id, collection_id, reward_amount, claimed_at)
+        VALUES ($1, $2, $3, NOW())
+        ON CONFLICT (user_id, collection_id) DO NOTHING
+        RETURNING *
+        """
+        return await conn.fetchrow(query, user_id, collection_id, reward_amount)
+
+async def check_collection_reward_claimed(user_id: int, collection_id: int):
+    """Проверяет, получал ли пользователь награду за коллекцию"""
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        query = """
+        SELECT * FROM collection_rewards 
+        WHERE user_id = $1 AND collection_id = $2
+        """
+        return await conn.fetchrow(query, user_id, collection_id)
+    
+
+# Добавляем в db/user_queries.py
+
+async def unlock_user_badge(user_id: int, badge_type: str, badge_emoji: str, badge_name: str, collection_id: int = None):
+    """Разблокирует значок пользователю"""
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        query = """
+        INSERT INTO user_badges (user_id, badge_type, badge_emoji, badge_name, collection_id)
+        VALUES ($1, $2, $3, $4, $5)
+        ON CONFLICT (user_id, badge_type, collection_id) DO NOTHING
+        RETURNING *
+        """
+        return await conn.fetchrow(query, user_id, badge_type, badge_emoji, badge_name, collection_id)
+
+async def get_user_badges(user_id: int):
+    """Получает все значки пользователя"""
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        query = """
+        SELECT * FROM user_badges 
+        WHERE user_id = $1 
+        ORDER BY unlocked_at DESC
+        """
+        return await conn.fetch(query, user_id)
+
+async def get_user_active_badge(user_id: int):
+    """Получает активный значок пользователя (для отображения)"""
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        query = """
+        SELECT * FROM user_badges 
+        WHERE user_id = $1 
+        ORDER BY 
+            CASE badge_emoji
+                WHEN '👑' THEN 1
+                WHEN '🥇' THEN 2
+                WHEN '🥈' THEN 3
+                WHEN '🥉' THEN 4
+                WHEN '🏆' THEN 5
+                ELSE 6
+            END,
+            unlocked_at DESC
+        LIMIT 1
+        """
+        return await conn.fetchrow(query, user_id)
+
+async def get_user_completed_collections_count(user_id: int):
+    """Получает количество завершенных коллекций пользователя"""
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        query = """
+        SELECT COUNT(*) as completed_count
+        FROM (
+            SELECT c.id
+            FROM collections c
+            LEFT JOIN cards card ON c.id = card.collection_id
+            LEFT JOIN user_cards uc ON card.id = uc.card_id AND uc.user_id = $1
+            GROUP BY c.id
+            HAVING COUNT(DISTINCT uc.card_id) = COUNT(DISTINCT card.id)
+        ) completed
+        """
+        return await conn.fetchval(query, user_id)
+    
+# Добавляем в db/user_queries.py
+
+async def get_user_profile_stats(user_id: int):
+    """Получает полную статистику для профиля пользователя"""
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        # Основная информация пользователя
+        user_query = """
+        SELECT 
+            u.username,
+            u.balance,
+            u.score,
+            u.created_at,
+            COUNT(DISTINCT uc.card_id) as unique_cards,
+            COUNT(uc.id) as total_cards,
+            (SELECT COUNT(*) FROM collections) as total_collections,
+            (SELECT COUNT(*) FROM collections c 
+             WHERE EXISTS (SELECT 1 FROM cards card 
+                          WHERE card.collection_id = c.id 
+                          AND EXISTS (SELECT 1 FROM user_cards uc2 
+                                     WHERE uc2.card_id = card.id 
+                                     AND uc2.user_id = u.user_id))) as collections_with_cards
+        FROM users u
+        LEFT JOIN user_cards uc ON u.user_id = uc.user_id
+        WHERE u.user_id = $1
+        GROUP BY u.user_id
+        """
+        user_data = await conn.fetchrow(user_query, user_id)
+        
+        if not user_data:
+            return None
+        
+        # Статистика игр
+        games_query = """
+        SELECT 
+            COUNT(*) as total_games,
+            COUNT(CASE WHEN result = 'win' THEN 1 END) as wins,
+            COALESCE(SUM(win_amount), 0) as total_winnings
+        FROM game_results 
+        WHERE user_id = $1
+        """
+        games_stats = await conn.fetchrow(games_query, user_id)
+        
+        # Статистика тренировок
+        training_query = """
+        SELECT 
+            COUNT(*) as total_trainings,
+            COUNT(CASE WHEN success = true THEN 1 END) as successful_trainings,
+            COALESCE(MAX(level), 1) as max_training_level
+        FROM training_results 
+        WHERE user_id = $1
+        """
+        training_stats = await conn.fetchrow(training_query, user_id)
+        
+        # Статистика рефералов
+        referral_query = """
+        SELECT 
+            COUNT(*) as total_referrals,
+            COUNT(CASE WHEN is_verified = TRUE THEN 1 END) as verified_referrals
+        FROM referrals 
+        WHERE referrer_id = $1
+        """
+        referral_stats = await conn.fetchrow(referral_query, user_id)
+        
+        # Завершенные коллекции
+        completed_collections_query = """
+        SELECT COUNT(*) as completed_collections
+        FROM (
+            SELECT c.id
+            FROM collections c
+            JOIN cards card ON c.id = card.collection_id
+            GROUP BY c.id
+            HAVING COUNT(DISTINCT card.id) = (
+                SELECT COUNT(DISTINCT uc2.card_id)
+                FROM user_cards uc2
+                JOIN cards card2 ON uc2.card_id = card2.id
+                WHERE uc2.user_id = $1 AND card2.collection_id = c.id
+            )
+        ) completed
+        """
+        completed_collections = await conn.fetchval(completed_collections_query, user_id)
+        
+        return {
+            'username': user_data['username'],
+            'balance': user_data['balance'],
+            'score': user_data['score'],
+            'created_at': user_data['created_at'],
+            'unique_cards': user_data['unique_cards'] or 0,
+            'total_cards': user_data['total_cards'] or 0,
+            'total_collections': user_data['total_collections'] or 0,
+            'collections_with_cards': user_data['collections_with_cards'] or 0,
+            'completed_collections': completed_collections or 0,
+            'total_games': games_stats['total_games'] or 0,
+            'wins': games_stats['wins'] or 0,
+            'total_winnings': games_stats['total_winnings'] or 0,
+            'total_trainings': training_stats['total_trainings'] or 0,
+            'successful_trainings': training_stats['successful_trainings'] or 0,
+            'max_training_level': training_stats['max_training_level'] or 1,
+            'total_referrals': referral_stats['total_referrals'] or 0,
+            'verified_referrals': referral_stats['verified_referrals'] or 0
+        }
+
+async def get_user_badges_with_collections(user_id: int):
+    """Получает значки пользователя с информацией о коллекциях"""
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        query = """
+        SELECT 
+            ub.*,
+            c.name as collection_name
+        FROM user_badges ub
+        LEFT JOIN collections c ON ub.collection_id = c.id
+        WHERE ub.user_id = $1 
+        ORDER BY 
+            CASE ub.badge_emoji
+                WHEN '👑' THEN 1
+                WHEN '🥇' THEN 2
+                WHEN '🥈' THEN 3
+                WHEN '🥉' THEN 4
+                WHEN '🏆' THEN 5
+                WHEN '⭐' THEN 6
+                ELSE 7
+            END,
+            ub.unlocked_at DESC
+        """
+        return await conn.fetch(query, user_id)

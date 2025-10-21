@@ -273,3 +273,182 @@ async def check_training_cooldown(user_id: int, drill_type: str):
         time_left = max(0, (next_available - now).total_seconds())
         
         return {'available': time_left == 0, 'time_left': time_left}
+    
+
+async def get_memory_records(limit=10):
+    """Получить топ рекордов памяти"""
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        return await conn.fetch(f'''
+            SELECT mr.*, u.username 
+            FROM memory_records mr 
+            LEFT JOIN users u ON mr.user_id = u.user_id 
+            ORDER BY mr.time_taken ASC 
+            LIMIT {limit}
+        ''')
+
+async def get_dribbling_records(limit=10):
+    """Получить топ рекордов обводки"""
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        return await conn.fetch(f'''
+            SELECT dr.*, u.username 
+            FROM dribbling_records dr 
+            LEFT JOIN users u ON dr.user_id = u.user_id 
+            ORDER BY dr.defenders_beaten DESC 
+            LIMIT {limit}
+        ''')
+
+async def check_and_update_memory_record(user_id, username, time_taken, sequence_length=5):
+    """Проверить и обновить рекорд памяти"""
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        # Получаем текущий топ-10
+        current_records = await get_memory_records(10)
+        
+        # Проверяем, попадает ли результат в топ-10
+        if len(current_records) < 10 or time_taken < current_records[-1]['time_taken']:
+            # Добавляем новый рекорд
+            await conn.execute('''
+                INSERT INTO memory_records (user_id, username, time_taken, sequence_length)
+                VALUES ($1, $2, $3, $4)
+            ''', user_id, username, time_taken, sequence_length)
+            
+            # Удаляем лишние записи (оставляем только топ-10)
+            await conn.execute('''
+                DELETE FROM memory_records 
+                WHERE id NOT IN (
+                    SELECT id FROM memory_records 
+                    ORDER BY time_taken ASC 
+                    LIMIT 10
+                )
+            ''')
+            return True
+        return False
+
+async def check_and_update_dribbling_record(user_id, username, defenders_beaten):
+    """Проверить и обновить рекорд обводки"""
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        # Получаем текущий топ-10
+        current_records = await get_dribbling_records(10)
+        
+        # Проверяем, попадает ли результат в топ-10
+        if len(current_records) < 10 or defenders_beaten > current_records[-1]['defenders_beaten']:
+            # Добавляем новый рекорд
+            await conn.execute('''
+                INSERT INTO dribbling_records (user_id, username, defenders_beaten)
+                VALUES ($1, $2, $3)
+            ''', user_id, username, defenders_beaten)
+            
+            # Удаляем лишние записи (оставляем только топ-10)
+            await conn.execute('''
+                DELETE FROM dribbling_records 
+                WHERE id NOT IN (
+                    SELECT id FROM dribbling_records 
+                    ORDER BY defenders_beaten DESC 
+                    LIMIT 10
+                )
+            ''')
+            return True
+        return False
+
+async def get_minesweeper_stats(user_id):
+    """Получить статистику сапёра для пользователя"""
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        return await conn.fetchrow('''
+            SELECT COUNT(*) as games_played, 
+                   SUM(success) as games_won,
+                   SUM(reward_earned) as total_earned
+            FROM training_results 
+            WHERE user_id = $1 AND drill_type = 'minesweeper'
+        ''', user_id)
+    
+# Реферальные запросы
+async def create_referral(referrer_id: int, referred_id: int):
+    """Создает реферальную связь"""
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        query = """
+        INSERT INTO referrals (referrer_id, referred_id) 
+        VALUES ($1, $2)
+        RETURNING *
+        """
+        try:
+            return await conn.fetchrow(query, referrer_id, referred_id)
+        except Exception as e:
+            print(f"Ошибка создания реферальной связи: {e}")
+            return None
+
+async def get_referral_by_referred(referred_id: int):
+    """Получает реферальную связь по приглашенному пользователю"""
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        query = "SELECT * FROM referrals WHERE referred_id = $1"
+        return await conn.fetchrow(query, referred_id)
+
+async def get_user_referrals(referrer_id: int):
+    """Получает всех приглашенных пользователей"""
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        query = """
+        SELECT r.*, u.username, u.created_at as user_created
+        FROM referrals r
+        LEFT JOIN users u ON r.referred_id = u.user_id
+        WHERE r.referrer_id = $1
+        ORDER BY r.created_at DESC
+        """
+        return await conn.fetch(query, referrer_id)
+
+async def verify_referral(referred_id: int):
+    """Помечает реферал как верифицированный (выполнил условия)"""
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        query = """
+        UPDATE referrals 
+        SET is_verified = TRUE, verified_at = NOW() 
+        WHERE referred_id = $1 AND is_verified = FALSE
+        RETURNING *
+        """
+        return await conn.fetchrow(query, referred_id)
+
+async def mark_reward_given(referred_id: int, reward_amount: int):
+    """Помечает что награда была выдана"""
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        query = """
+        UPDATE referrals 
+        SET reward_given = TRUE, reward_amount = $2 
+        WHERE referred_id = $1 AND reward_given = FALSE
+        RETURNING *
+        """
+        return await conn.fetchrow(query, referred_id, reward_amount)
+
+async def get_referral_stats(referrer_id: int):
+    """Получает статистику по рефералам"""
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        query = """
+        SELECT 
+            COUNT(*) as total_referrals,
+            COUNT(CASE WHEN is_verified = TRUE THEN 1 END) as verified_referrals,
+            COUNT(CASE WHEN reward_given = TRUE THEN 1 END) as rewarded_referrals,
+            COALESCE(SUM(reward_amount), 0) as total_rewards_earned
+        FROM referrals 
+        WHERE referrer_id = $1
+        """
+        return await conn.fetchrow(query, referrer_id)
+
+async def check_user_activity_requirements(user_id: int):
+    """Проверяет выполнил ли пользователь условия для верификации реферала"""
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        # Проверяем есть ли хотя бы одна карта и одна тренировка
+        query = """
+        SELECT 
+            EXISTS(SELECT 1 FROM user_cards WHERE user_id = $1 LIMIT 1) as has_cards,
+            EXISTS(SELECT 1 FROM training_results WHERE user_id = $1 LIMIT 1) as has_trainings
+        """
+        result = await conn.fetchrow(query, user_id)
+        return result['has_cards'] and result['has_trainings']

@@ -4,6 +4,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from typing import List, Dict, Any
 import os
+from db.user_queries import *
 
 from db.card_queries import get_user_cards_by_rarity, get_user_card_details, get_user_total_cards_count
 
@@ -24,6 +25,32 @@ RARITY_STYLES = {
 }
 
 @router.callback_query(F.data == "my_cards")
+async def cards_menu(callback: CallbackQuery, state: FSMContext):
+    """Меню карт с выбором между картами и альбомом"""
+    user_id = callback.from_user.id
+    
+    try:
+        # Получаем базовую статистику
+        user_stats = await get_user_stats(user_id)
+        
+        text = (
+            "🃏 <b>МОИ КАРТЫ</b>\n\n"
+            "📋 <b>Выберите раздел:</b>"
+        )
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🎴 Просмотр карт", callback_data="view_cards")],
+            [InlineKeyboardButton(text="📚 Альбом коллекций", callback_data="album")],
+            [InlineKeyboardButton(text="🔙 Назад в меню", callback_data="back_to_menu")]
+        ])
+        
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+        
+    except Exception as e:
+        print(f"Error in cards_menu: {e}")
+        await callback.answer("❌ Ошибка загрузки меню", show_alert=True)
+
+@router.callback_query(F.data == "view_cards")
 async def show_rarity_selection(callback: CallbackQuery, state: FSMContext):
     """Показывает выбор редкости карт"""
     try:
