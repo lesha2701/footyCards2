@@ -28,6 +28,8 @@ async def market_menu(callback: CallbackQuery, state: FSMContext):
 
 📊 <i>Торговая площадка для настоящих коллекционеров</i>
 
+В <a href='https://t.me/FootycardChat'>нашем чате</a> вы можете общаться с игроками и продавать карточки
+
 🎯 Выберите действие:"""
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[

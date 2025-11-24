@@ -39,6 +39,11 @@ async def start(message: Message, state: FSMContext, bot) -> None:
     chat_id = message.chat.id
     username = html.escape(message.from_user.full_name)
     
+    # Обновляем юзернейм пользователя
+    if hasattr(message.from_user, 'username') and message.from_user.username:
+        from db.user_queries import update_user_uz
+        await update_user_uz(user_id, message.from_user.username)
+    
     # Проверяем тип чата
     is_private = is_private_chat(chat_id, user_id)
     
@@ -97,7 +102,7 @@ async def start(message: Message, state: FSMContext, bot) -> None:
     
     if is_new_user:
         # Создаем нового пользователя с бонусом за реферал
-        start_balance = 200
+        start_balance = 400
         if referrer_id:
             start_balance += 50  # Дополнительный бонус новому пользователю за переход по ссылке
             referral_bonus = 50
@@ -179,7 +184,7 @@ async def start(message: Message, state: FSMContext, bot) -> None:
 💎 <b>5. Улучшай коллекцию</b> - Покупай новые паки на заработанные монеты
 </blockquote>
 
-💰 <b>Стартовый бонус:</b> 200 монет для первых покупок!
+💰 <b>Стартовый бонус:</b> 400 монет для первых покупок!
 
 👥 <b>Хочешь получить больше монет?</b>
 Приглашай друзей и получай до 1000+ монет за каждого!

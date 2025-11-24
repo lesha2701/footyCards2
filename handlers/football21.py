@@ -175,7 +175,7 @@ class Football21States(StatesGroup):
     playing = State()
 
 # Ставки для футбольной версии
-FOOTBALL_BET_AMOUNTS = [100, 250, 500, 1000, 2500, 5000, 10000]
+FOOTBALL_BET_AMOUNTS = [100, 250, 500, 1000, 2000]
 
 @router.callback_query(F.data == "open_football21")
 async def open_football21(callback: CallbackQuery, state: FSMContext):

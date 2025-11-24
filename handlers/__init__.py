@@ -16,6 +16,9 @@ def setup_message_routers() -> Router:
     from . import referral_system
     from . import album
     from . import profile
+    from . import broadcast
+    from . import craft
+    from . import penalty
 
     router = Router()
     router.include_router(start.router)
@@ -32,5 +35,8 @@ def setup_message_routers() -> Router:
     router.include_router(referral_system.router)
     router.include_router(album.router)
     router.include_router(profile.router)
+    router.include_router(broadcast.router)
+    router.include_router(craft.router)
+    router.include_router(penalty.router)
     
     return router

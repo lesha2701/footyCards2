@@ -261,6 +261,7 @@ async def display_current_pack(callback: CallbackQuery, state: FSMContext, messa
         full_message = (
             f"{style['icon']} <b>{style['header']}</b>\n\n"
             f"💰 <b>Ваш баланс:</b> {user['balance']} монет\n\n"
+            f"В <a href='https://t.me/FootycardChat'>нашем чате</a> можно открыть беспалнтую карту по команде <b>футкарта2</b>\n\n"
             f"{pack_card}"
         )
         

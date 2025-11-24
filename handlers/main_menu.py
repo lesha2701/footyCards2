@@ -12,14 +12,14 @@ router = Router()
 
 # Конфигурация каналов для подписки
 CHANNELS_CONFIG = {
-    -1002216462966: {  # ID канала 1
-        'name': '📢 HXH',
-        'url': 'https://t.me/HXHFTBL'
-    },
-    -1002459798852: {  # ID канала 2
-        'name': '🎮 Основной канал', 
-        'url': 'https://t.me/FootyCardsChannel'
-    }
+    # -1002419352025: {  # ID канала 1
+    #     'name': '📢 French football 🇫🇷 | Французский футбол 🇫🇷',
+    #     'url': 'https://t.me/+-zepHA3fa6c1NjNi'
+    # },
+    # -1002508285655: {  # ID канала 2
+    #     'name': '📢 El Partido | FC BARCELONA', 
+    #     'url': 'https://t.me/+0gvqGq4dXMdkMzky'
+    # }
 }
 
 async def check_channels_subscription(user_id: int, bot: Bot) -> tuple[bool, list]:
@@ -82,6 +82,11 @@ async def show_menu(message: Message | CallbackQuery, state: FSMContext):
     user_id = message.from_user.id
     
     try:
+        # Обновляем юзернейм пользователя
+        if hasattr(message.from_user, 'username') and message.from_user.username:
+            from db.user_queries import update_user_uz
+            await update_user_uz(user_id, message.from_user.username)
+        
         # Получаем статистику пользователя
         user_stats = await get_user_stats(user_id)
         
@@ -92,6 +97,7 @@ async def show_menu(message: Message | CallbackQuery, state: FSMContext):
         text = (
             f"🎮 <b>Главное меню</b>\n\n"
             f"{stats_text}\n"
+            f"Следи за обновлениями и новостями в нашем канале - @FootyCardsChannel\n\n"
             f"📋 <b>Выберите действие:</b>"
         )
         
@@ -99,11 +105,11 @@ async def show_menu(message: Message | CallbackQuery, state: FSMContext):
             [InlineKeyboardButton(text="📦 Магазин паков", callback_data="show_shop_packs")],
             [InlineKeyboardButton(text="⚔️ Игровые режимы", callback_data="play_menu")],
             [InlineKeyboardButton(text="🏪 Маркет", callback_data="market_menu")],
-            [InlineKeyboardButton(text="🃏 Мои карты", callback_data="my_cards")],
+            [InlineKeyboardButton(text="🃏 Карты", callback_data="my_cards")],
+            [InlineKeyboardButton(text="🛠️ Крафт карт", callback_data="craft_menu")],
             [InlineKeyboardButton(text="👤 Мой профиль", callback_data="profile")],
             [InlineKeyboardButton(text="👥 Пригласить друзей", callback_data="referral_system")],
             [InlineKeyboardButton(text="🏆 Рейтинг игроков", callback_data="show_leaderboard")],
-            [InlineKeyboardButton(text="📚 Коллекции", callback_data="show_collections")],  # Новая кнопка
             [InlineKeyboardButton(text="💎 Пополнить баланс", callback_data="donate_menu")]
         ])
         
@@ -128,11 +134,11 @@ async def show_menu(message: Message | CallbackQuery, state: FSMContext):
             [InlineKeyboardButton(text="📦 Магазин паков", callback_data="show_shop_packs")],
             [InlineKeyboardButton(text="⚔️ Игровые режимы", callback_data="play_menu")],
             [InlineKeyboardButton(text="🏪 Маркет", callback_data="market_menu")],
-            [InlineKeyboardButton(text="🃏 Мои карты", callback_data="my_cards")],
+            [InlineKeyboardButton(text="🃏 Карты", callback_data="my_cards")],
+            [InlineKeyboardButton(text="🛠️ Крафт карт", callback_data="craft_menu")],
             [InlineKeyboardButton(text="👤 Мой профиль", callback_data="profile")],
             [InlineKeyboardButton(text="👥 Пригласить друзей", callback_data="referral_system")],
             [InlineKeyboardButton(text="🏆 Рейтинг игроков", callback_data="show_leaderboard")],
-            [InlineKeyboardButton(text="📚 Коллекции", callback_data="show_collections")],  # Новая кнопка
             [InlineKeyboardButton(text="💎 Пополнить баланс", callback_data="donate_menu")]
         ])
         
@@ -176,6 +182,7 @@ async def play_menu(callback: CallbackQuery, state: FSMContext, bot: Bot):
     
     # Если подписка есть, показываем игровые режимы
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🎯 Пенальти", callback_data="penalty_mode")],
         [InlineKeyboardButton(text="💪 Футбольные тренировки", callback_data="open_training")],
         [InlineKeyboardButton(text="🎲 Футбольные кости", callback_data="open_footballDice")],
         [InlineKeyboardButton(text="🃏 Блэк Джек", callback_data="open_football21")],
@@ -195,6 +202,7 @@ async def check_subscription_handler(callback: CallbackQuery, state: FSMContext,
     if is_subscribed:
         # Если подписан на все каналы, показываем игровые режимы
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🎯 Пенальти", callback_data="penalty_mode")],
             [InlineKeyboardButton(text="💪 Футбольные тренировки", callback_data="open_training")],
             [InlineKeyboardButton(text="🎲 Футбольные кости", callback_data="open_footballDice")],
             [InlineKeyboardButton(text="🃏 Блэк Джек", callback_data="open_football21")],
@@ -259,24 +267,41 @@ async def create_compact_stats_display(stats) -> str:
     )
 
 @router.callback_query(F.data == "show_leaderboard")
-async def show_leaderboard(callback: CallbackQuery, state: FSMContext):
+async def show_leaderboard_menu(callback: CallbackQuery, state: FSMContext):
+    """Показывает меню выбора типа рейтинга"""
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⭐ Топ по очкам", callback_data="leaderboard_score")],
+        [InlineKeyboardButton(text="🎯 Топ по рейтингу пенальти", callback_data="leaderboard_penalty")],
+        [InlineKeyboardButton(text="🔙 Назад в меню", callback_data="back_to_menu")]
+    ])
+    
+    await callback.message.edit_text(
+        "🏆 <b>Рейтинг игроков</b>\n\n"
+        "Выберите тип рейтинга для просмотра:",
+        reply_markup=keyboard,
+        parse_mode="HTML"
+    )
+
+@router.callback_query(F.data == "leaderboard_score")
+async def show_leaderboard_score(callback: CallbackQuery, state: FSMContext):
     """Показывает рейтинг игроков по очкам"""
     user_id = callback.from_user.id
     
     try:
-        # Получаем данные рейтинга
-        leaderboard_data = await get_leaderboard(user_id)
+        # Получаем данные рейтинга по очкам
+        leaderboard_data = await get_leaderboard_score(user_id)
         
         if not leaderboard_data:
             await callback.answer("❌ Ошибка загрузки рейтинга", show_alert=True)
             return
         
         # Создаем красивое отображение рейтинга
-        leaderboard_text = await create_leaderboard_display(leaderboard_data, user_id)
+        leaderboard_text = await create_leaderboard_score_display(leaderboard_data, user_id)
         
         # Создаем клавиатуру
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔙 Назад в меню", callback_data="back_to_menu")]
+            [InlineKeyboardButton(text="🎯 Топ по рейтингу пенальти", callback_data="leaderboard_penalty")],
+            [InlineKeyboardButton(text="🔙 Назад к выбору рейтинга", callback_data="show_leaderboard")]
         ])
         
         # Отправляем или редактируем сообщение
@@ -297,11 +322,54 @@ async def show_leaderboard(callback: CallbackQuery, state: FSMContext):
         await callback.answer()
         
     except Exception as e:
-        print(f"[{datetime.now()}] ОШИБКА в show_leaderboard: {e}")
+        print(f"[{datetime.now()}] ОШИБКА в show_leaderboard_score: {e}")
         await callback.answer("❌ Ошибка загрузки рейтинга", show_alert=True)
 
-async def create_leaderboard_display(leaderboard_data, current_user_id: int) -> str:
-    """Создает красивое отображение рейтинга"""
+@router.callback_query(F.data == "leaderboard_penalty")
+async def show_leaderboard_penalty(callback: CallbackQuery, state: FSMContext):
+    """Показывает рейтинг игроков по рейтингу пенальти"""
+    user_id = callback.from_user.id
+    
+    try:
+        # Получаем данные рейтинга по пенальти
+        leaderboard_data = await get_leaderboard_penalty(user_id)
+        
+        if not leaderboard_data:
+            await callback.answer("❌ Ошибка загрузки рейтинга пенальти", show_alert=True)
+            return
+        
+        # Создаем красивое отображение рейтинга
+        leaderboard_text = await create_leaderboard_penalty_display(leaderboard_data, user_id)
+        
+        # Создаем клавиатуру
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⭐ Топ по очкам", callback_data="leaderboard_score")],
+            [InlineKeyboardButton(text="🔙 Назад к выбору рейтинга", callback_data="show_leaderboard")]
+        ])
+        
+        # Отправляем или редактируем сообщение
+        try:
+            await callback.message.edit_text(
+                text=leaderboard_text,
+                reply_markup=keyboard,
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            print(f"[{datetime.now()}] Не удалось отредактировать сообщение: {e}")
+            await callback.message.answer(
+                text=leaderboard_text,
+                reply_markup=keyboard,
+                parse_mode="HTML"
+            )
+        
+        await callback.answer()
+        
+    except Exception as e:
+        print(f"[{datetime.now()}] ОШИБКА в show_leaderboard_penalty: {e}")
+        await callback.answer("❌ Ошибка загрузки рейтинга пенальти", show_alert=True)
+
+async def create_leaderboard_score_display(leaderboard_data, current_user_id: int) -> str:
+    """Создает красивое отображение рейтинга по очкам"""
     top_players = leaderboard_data['top_players']
     user_position = leaderboard_data['user_position']
     total_players = leaderboard_data['total_players']
@@ -357,6 +425,70 @@ async def create_leaderboard_display(leaderboard_data, current_user_id: int) -> 
     text += f"\n👥 <b>Всего игроков в рейтинге:</b> {total_players}"
     
     return text
+
+async def create_leaderboard_penalty_display(leaderboard_data, current_user_id: int) -> str:
+    """Создает красивое отображение рейтинга по пенальти"""
+    top_players = leaderboard_data['top_players']
+    user_position = leaderboard_data['user_position']
+    total_players = leaderboard_data['total_players']
+    current_user = leaderboard_data['current_user']
+    
+    # Эмодзи для позиций в топе
+    position_emojis = {
+        1: "🥇",
+        2: "🥈", 
+        3: "🥉"
+    }
+    
+    # Заголовок
+    text = "🎯 <b>Рейтинг игроков по пенальти</b>\n\n"
+    
+    # Топ игроков
+    if top_players:
+        text += "<b>Топ-10 игроков:</b>\n"
+        text += "<blockquote>"
+        
+        for i, player in enumerate(top_players, 1):
+            emoji = position_emojis.get(i, f"{i}.")
+            username = player['username'] or f"Игрок {player['user_id']}"
+            
+            # Обрезаем длинные имена пользователей
+            if len(username) > 20:
+                username = username[:20] + "..."
+            
+            # Выделяем текущего пользователя
+            if player['user_id'] == current_user_id:
+                text += f"{emoji} <b>👉 {username}</b> - {player['penalty_rating']:,} рейтинг 🎯\n"
+            else:
+                text += f"{emoji} {username} - {player['penalty_rating']:,} рейтинг\n"
+        text += "</blockquote>"
+    else:
+        text += "😴 <i>Пока никто не играл в пенальти</i>\n"
+    
+    text += "\n"
+    
+    # Позиция текущего пользователя
+    if user_position:
+        if user_position <= 10:
+            text += f"✅ <b>Вы в топ-10!</b> Позиция: #{user_position}\n"
+        else:
+            text += f"📊 <b>Ваша позиция:</b> #{user_position} из {total_players}\n"
+            
+        if current_user:
+            text += f"🎯 <b>Ваш рейтинг:</b> {current_user['penalty_rating']:,}\n"
+    else:
+        text += "📊 <i>У вас пока нет рейтинга в пенальти</i>\n"
+    
+    # Общая статистика
+    text += f"\n👥 <b>Всего игроков в рейтинге:</b> {total_players}"
+    
+    return text
+
+# Обновляем старый обработчик для совместимости
+@router.callback_query(F.data == "show_leaderboard")
+async def show_leaderboard_old(callback: CallbackQuery, state: FSMContext):
+    """Старый обработчик для совместимости - перенаправляет в меню выбора"""
+    await show_leaderboard_menu(callback, state)
 
 @router.callback_query(F.data == "show_collections")
 async def show_collections(callback: CallbackQuery, state: FSMContext):

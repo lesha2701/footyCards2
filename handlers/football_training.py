@@ -185,7 +185,7 @@ async def show_memory_records(callback: CallbackQuery):
             records_text += f"{medal} {username} - {time_taken:.2f}с\n"
 
     
-    records_text += "\n🏅 Рекорд игры: Кот - 6.49с"
+    records_text += "\n🏅 Рекорд игры: ~ - 6.30с"
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🌀 Рекорды обводки", callback_data="show_dribbling_records")],
@@ -212,7 +212,7 @@ async def show_dribbling_records(callback: CallbackQuery):
             
             records_text += f"{medal} {username} - {defenders} защитников\n"
 
-    records_text += "\n🏅 Рекорд игры: Vesel4ak - 24 защитников"
+    records_text += "\n🏅 Рекорд игры: M28 - 33 защитника"
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🧠 Рекорды памяти", callback_data="show_memory_records")],

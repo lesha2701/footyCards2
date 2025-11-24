@@ -40,7 +40,8 @@ async def cards_menu(callback: CallbackQuery, state: FSMContext):
         
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🎴 Просмотр карт", callback_data="view_cards")],
-            [InlineKeyboardButton(text="📚 Альбом коллекций", callback_data="album")],
+            [InlineKeyboardButton(text="📗 Альбом коллекций", callback_data="album")],
+            [InlineKeyboardButton(text="📚 Коллекции", callback_data="show_collections")],
             [InlineKeyboardButton(text="🔙 Назад в меню", callback_data="back_to_menu")]
         ])
         

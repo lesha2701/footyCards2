@@ -9,25 +9,6 @@ import random
 FREE_PACK_COOLDOWN = 3
 MOSCOW_TZ = pytz.timezone('Europe/Moscow')
 
-PENALTY_V2_CONFIG = {
-    'kicks_count': 5,
-    'time_limit_minutes': 5,
-    # Рейтинг для игр с игроком
-    'rating_change_win': 30,
-    'rating_change_lose': -15,
-    'rating_change_draw': 5,  # +5 за ничью
-    # Рейтинг для игр с ботом (в 3 раза меньше)
-    'rating_bot_multiplier': 0.33,
-    # Монеты для игр с игроком
-    'coins_win': 150,  # Увеличили с 100 до 150
-    'coins_lose': 15,  # Увеличили с 10 до 15
-    'coins_draw': 75,  # Увеличили с 50 до 75
-    # Монеты для игр с ботом
-    'coins_bot_win': 50,
-    'coins_bot_lose': 5,
-    'coins_bot_draw': 25
-}
-
 async def get_user_by_id(user_id: int):
     """Получаем пользователя по ID со статистикой"""
     pool = await get_db_pool()
@@ -76,7 +57,6 @@ async def get_user_stats(user_id: int):
             u.user_id,
             u.username,
             u.balance,
-            u.penalty_rating
             COUNT(uc.id) as total_cards,
             COUNT(DISTINCT uc.card_id) as unique_cards,
             COUNT(DISTINCT CASE WHEN c.rarity = 'legendary' THEN uc.card_id END) as legendary_cards,
@@ -585,7 +565,7 @@ async def get_user_stats(user_id: int):
             'total_bets': games_stats['total_bets'] or 0
         }
     
-async def get_leaderboard_score(user_id: int, limit: int = 10):
+async def get_leaderboard(user_id: int, limit: int = 10):
     """Получает топ игроков по очкам и позицию текущего пользователя"""
     pool = await get_db_pool()
     async with pool.acquire() as conn:
@@ -616,46 +596,6 @@ async def get_leaderboard_score(user_id: int, limit: int = 10):
         
         # Получаем данные текущего пользователя
         user_data_query = "SELECT username, score FROM users WHERE user_id = $1"
-        user_data = await conn.fetchrow(user_data_query, user_id)
-        
-        return {
-            'top_players': [dict(player) for player in top_players],
-            'user_position': user_position,
-            'total_players': total_players,
-            'current_user': dict(user_data) if user_data else None
-        }
-    
-async def get_leaderboard_penalty(user_id: int, limit: int = 10):
-    """Получает топ игроков по очкам и позицию текущего пользователя"""
-    pool = await get_db_pool()
-    async with pool.acquire() as conn:
-        # Получаем топ игроков
-        top_players_query = """
-        SELECT user_id, username, penalty_rating, balance
-        FROM users 
-        WHERE penalty_rating > 0
-        ORDER BY penalty_rating DESC 
-        LIMIT $1
-        """
-        top_players = await conn.fetch(top_players_query, limit)
-        
-        # Получаем позицию текущего пользователя
-        user_position_query = """
-        SELECT position FROM (
-            SELECT user_id, ROW_NUMBER() OVER (ORDER BY penalty_rating DESC) as position
-            FROM users 
-            WHERE penalty_rating > 0
-        ) ranked 
-        WHERE user_id = $1
-        """
-        user_position = await conn.fetchval(user_position_query, user_id)
-        
-        # Получаем общее количество игроков с очками
-        total_players_query = "SELECT COUNT(*) FROM users WHERE penalty_rating > 0"
-        total_players = await conn.fetchval(total_players_query)
-        
-        # Получаем данные текущего пользователя
-        user_data_query = "SELECT username, penalty_rating FROM users WHERE user_id = $1"
         user_data = await conn.fetchrow(user_data_query, user_id)
         
         return {
@@ -1537,7 +1477,7 @@ async def get_user_penalty_stats(user_id: int):
             COALESCE(SUM(pr.coins_earned), 0) as total_coins_earned
         FROM users u
         LEFT JOIN penalty_results pr ON (u.user_id = pr.player1_id OR u.user_id = pr.player2_id)
-        WHERE u.user_id = $1 AND pr.is_completed = TRUE AND pr.user_id = $1
+        WHERE u.user_id = $1 AND pr.is_completed = TRUE
         GROUP BY u.user_id
         """
         return await conn.fetchrow(query, user_id)
@@ -1662,11 +1602,10 @@ async def can_play_penalty_today(user_id: int):
         WHERE (player1_id = $1 OR player2_id = $1) 
         AND completed_at >= $2
         AND is_completed = TRUE
-        AND user_id = $1
         """, user_id, one_hour_ago)
         
         # Проверяем лимит (3 игры в час)
-        if games_count >= PENALTY_V2_CONFIG['time_limit_minutes']:
+        if games_count >= 3:
             # Находим время самой старой игры в этом часовом окне
             oldest_game_time = await conn.fetchval("""
             SELECT MIN(completed_at) 
@@ -2026,12 +1965,13 @@ async def create_penalty_invitation_v2(inviter_id: int, invitee_identifier: str,
             
             await bot.send_message(
                 chat_id=invitee_id,
-                text=f"🎯 <b>Приглашение на пенальти!</b>\n\n"
-                    f"Игрок <b>{inviter_username}</b> приглашает вас на матч в режиме пенальти!\n\n"
-                    f"⚽ <b>Правила:</b>\n"
-                    f"• 5 основных ударов\n"
-                    f"• Выбор карты влияет на шанс промаха\n"
-                    f"• Награда: 100 монет за победу",
+                text=f"🎯 <b>Приглашение на пенальти v2!</b>\n\n"
+                     f"Игрок <b>{inviter_username}</b> приглашает вас на матч в новой системе пенальти!\n\n"
+                     f"⚽ <b>Новая система:</b>\n"
+                     f"• Заранее определите 5 ударов и 5 защит\n"
+                     f"• Результат вычисляется автоматически\n"
+                     f"• Максимально честно и быстро\n\n"
+                     f"<i>Приглашение действует 2 минуты</i>",
                 reply_markup=keyboard,
                 parse_mode="HTML"
             )
@@ -2050,119 +1990,37 @@ async def toggle_shadow_mode(user_id: int, enable: bool):
         await conn.execute(query, enable, user_id)
 
 async def save_penalty_result_v2(match: dict, result: dict, rating_change: int, coins_earned: int, user_id: int):
-    """Сохраняет результат матча в penalty_results для КАЖДОГО игрока отдельно"""
+    """Сохраняет результат матча в penalty_results"""
     pool = await get_db_pool()
     async with pool.acquire() as conn:
-        # Определяем участников матча
-        player1_id = match['player1_id']
-        player2_id = match['player2_id'] if not match['is_vs_bot'] else None
-        
-        # Для каждого игрока создаем отдельную запись с его перспективой
-        players_data = []
+        # Определяем, кто является игроком 1 и 2
+        is_player1 = match['player1_id'] == user_id
         
         if match['is_vs_bot']:
-            # Для игры с ботом - только один реальный игрок
-            players_data.append({
-                'user_id': player1_id,
-                'opponent_id': None,
-                'player_score': result['player1_score'],
-                'opponent_score': result['player2_score'],
-                'player_username': match['player1_username'],
-                'opponent_username': 'Бот',
-                'is_player1': True
-            })
+            player2_id = None
+            player2_username = "Бот"
         else:
-            # Для PvP - оба игрока
-            players_data.extend([
-                {
-                    'user_id': player1_id,
-                    'opponent_id': player2_id,
-                    'player_score': result['player1_score'],
-                    'opponent_score': result['player2_score'],
-                    'player_username': match['player1_username'],
-                    'opponent_username': match['player2_username'],
-                    'is_player1': True
-                },
-                {
-                    'user_id': player2_id,
-                    'opponent_id': player1_id,
-                    'player_score': result['player2_score'],
-                    'opponent_score': result['player1_score'],
-                    'player_username': match['player2_username'],
-                    'opponent_username': match['player1_username'],
-                    'is_player1': False
-                }
-            ])
+            player2_id = match['player2_id'] if is_player1 else match['player1_id']
+            player2_username = match['player2_username'] if is_player1 else match['player1_username']
         
-        # Сохраняем записи для каждого игрока
-        for player_data in players_data:
-            # Определяем награды для этого игрока
-            if match['is_vs_bot']:
-                # ДЛЯ БОТА: player_data['is_player1'] всегда True, так как есть только один реальный игрок
-                if result['player1_score'] > result['player2_score']:
-                    is_winner = True  # Игрок победил бота
-                    is_draw = False
-                elif result['player2_score'] > result['player1_score']:
-                    is_winner = False  # Бот победил
-                    is_draw = False
-                else:
-                    is_winner = False
-                    is_draw = True
-                
-                if is_winner:
-                    player_rating_change = int(PENALTY_V2_CONFIG['rating_change_win'] * PENALTY_V2_CONFIG['rating_bot_multiplier'])
-                    player_coins_earned = PENALTY_V2_CONFIG['coins_bot_win']
-                elif is_draw:
-                    player_rating_change = int(PENALTY_V2_CONFIG['rating_change_draw'] * PENALTY_V2_CONFIG['rating_bot_multiplier'])
-                    player_coins_earned = PENALTY_V2_CONFIG['coins_bot_draw']
-                else:
-                    player_rating_change = int(PENALTY_V2_CONFIG['rating_change_lose'] * PENALTY_V2_CONFIG['rating_bot_multiplier'])
-                    player_coins_earned = PENALTY_V2_CONFIG['coins_bot_lose']
-            else:
-                # ДЛЯ PvP
-                is_winner = result['winner_id'] == player_data['user_id']
-                is_draw = result['winner_id'] is None
-                
-                if is_winner:
-                    player_rating_change = PENALTY_V2_CONFIG['rating_change_win']
-                    player_coins_earned = PENALTY_V2_CONFIG['coins_win']
-                elif is_draw:
-                    player_rating_change = PENALTY_V2_CONFIG['rating_change_draw']
-                    player_coins_earned = PENALTY_V2_CONFIG['coins_draw']
-                else:
-                    player_rating_change = PENALTY_V2_CONFIG['rating_change_lose']
-                    player_coins_earned = PENALTY_V2_CONFIG['coins_lose']
-            
-            # Обновляем рейтинг и баланс для игрока
-            if player_rating_change != 0:
-                await update_user_penalty_rating(player_data['user_id'], player_rating_change)
-            
-            await update_user_balance(player_data['user_id'], player_coins_earned)
-            await update_daily_penalty_games(player_data['user_id'])
-            
-            # Сохраняем запись результата
-            query = """
-            INSERT INTO penalty_results 
-            (player1_id, player2_id, player1_username, player2_username,
-             player1_score, player2_score, winner_id, is_vs_bot,
-             rating_change, coins_earned, created_at, completed_at, is_completed,
-             match_id, user_id, is_winner)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW(), TRUE, $11, $12, $13)
-            """
-            
-            await conn.execute(
-                query,
-                player_data['user_id'],  # player1_id в этой записи - текущий игрок
-                player_data['opponent_id'],  # player2_id - оппонент
-                player_data['player_username'],  # player1_username - текущий игрок
-                player_data['opponent_username'],  # player2_username - оппонент
-                player_data['player_score'],  # player1_score - счет текущего игрока
-                player_data['opponent_score'],  # player2_score - счет оппонента
-                result['winner_id'],
-                match['is_vs_bot'],
-                player_rating_change,
-                player_coins_earned,
-                match['id'],
-                player_data['user_id'],  # ID пользователя для этой записи
-                is_winner  # Флаг победы для этого игрока
-            )
+        query = """
+        INSERT INTO penalty_results 
+        (player1_id, player2_id, player1_username, player2_username,
+         player1_score, player2_score, winner_id, is_vs_bot,
+         rating_change, coins_earned, created_at, completed_at, is_completed)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW(), TRUE)
+        """
+        
+        await conn.execute(
+            query,
+            match['player1_id'],
+            player2_id,
+            match['player1_username'],
+            player2_username,
+            result['player1_score'],
+            result['player2_score'],
+            result['winner_id'],
+            match['is_vs_bot'],
+            rating_change,
+            coins_earned
+        )
