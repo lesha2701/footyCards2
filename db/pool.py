@@ -5,10 +5,10 @@ pool = None
 async def create_db_pool():
     global pool
     pool = await asyncpg.create_pool(
-        user='postgres',
-        password='root',
-        database='footycards2',
-        host='localhost',
+        user='gen_user',
+        password='eoAxgddEC#44tL',
+        database='default_db',
+        host='195.58.34.254',
         port=5432
     )
     return pool

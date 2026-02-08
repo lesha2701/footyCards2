@@ -1,79 +1,227 @@
 from db.pool import get_db_pool
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict
 import random
-import math
 from datetime import datetime, timedelta
+from db.card_queries import (
+    get_collection_cards_by_level, 
+    get_available_collections_by_card_rarity,
+    get_random_card_by_rarity
+)
 
 async def generate_pack_cards(pack: Dict) -> List[Dict]:
-    """Генерирует карты для пака на основе его настроек БЕЗ ДУБЛИКАТОВ"""
+    """Генерирует карты для пака по новой логике"""
+    pool = await get_db_pool()
+    cards_count = pack.get('cards_amount', 5)
+    selected_cards = []
+    
+    # Шансы редкостей из пака
+    rarity_probs = {
+        'common': pack.get('common_chance', 70) / 100.0,
+        'rare': pack.get('rare_chance', 25) / 100.0,
+        'epic': pack.get('epic_chance', 4) / 100.0,
+        'legendary': pack.get('legendary_chance', 1) / 100.0
+    }
+    
+    print(f"🎴 Генерация карт для пака '{pack['name']}' ({pack['id']}): {cards_count} карт")
+    
+    for i in range(cards_count):
+        try:
+            # ШАГ 1: Определяем редкость карты
+            rarity = select_rarity(rarity_probs)
+            print(f"  Карта {i+1}: редкость = {rarity}")
+            
+            # ШАГ 2: Определяем уровень коллекции для этой редкости
+            collection_level = await select_collection_level_for_rarity(pool, rarity)
+            print(f"    -> уровень коллекции = {collection_level}")
+            
+            # ШАГ 3: Выбираем случайную карту из коллекций этого уровня
+            card = await get_random_card_by_rarity_and_level(pool, rarity, collection_level)
+            
+            if card:
+                print(f"    -> {card.get('player_name', '?')} [{card.get('rarity', '?')}] из {collection_level}")
+                selected_cards.append(dict(card))
+            else:
+                # Fallback: если нет карт, берем просто карту нужной редкости
+                print(f"    -> Нет карт уровня {collection_level}, берем любую карту редкости {rarity}")
+                fallback_card = await get_random_card_by_rarity_fallback(pool, rarity)
+                if fallback_card:
+                    selected_cards.append(dict(fallback_card))
+                    
+        except Exception as e:
+            print(f"    -> Ошибка генерации карты {i+1}: {e}")
+            continue
+    
+    return selected_cards
+
+async def select_collection_level_for_rarity(pool, rarity: str) -> str:
+    """Выбирает уровень коллекции на основе редкости карты"""
+    async with pool.acquire() as conn:
+        # Получаем вероятности уровней для этой редкости
+        query = """
+        SELECT collection_level, probability 
+        FROM collection_level_probabilities 
+        WHERE card_rarity = $1
+        """
+        results = await conn.fetch(query, rarity)
+        
+        if not results:
+            # Дефолтные вероятности если нет в БД
+            default_probs = {
+                'common': {'ordinary': 70, 'rare': 20, 'super_rare': 10},
+                'rare': {'ordinary': 60, 'rare': 25, 'super_rare': 15},
+                'epic': {'ordinary': 50, 'rare': 30, 'super_rare': 20},
+                'legendary': {'ordinary': 40, 'rare': 40, 'super_rare': 20}
+            }
+            probs = default_probs.get(rarity, {'ordinary': 100})
+        else:
+            probs = {row['collection_level']: row['probability'] for row in results}
+        
+        # Преобразуем проценты в дроби и нормализуем
+        total = sum(probs.values())
+        if total == 0:
+            return 'ordinary'  # fallback
+        
+        # Выбираем уровень на основе вероятностей
+        roll = random.random() * total
+        cumulative = 0
+        for level, prob in probs.items():
+            cumulative += prob
+            if roll <= cumulative:
+                return level
+        
+        return 'ordinary'  # fallback
+    
+async def get_random_card_by_rarity_and_level(pool, rarity: str, collection_level: str) -> Dict:
+    """Получает случайную карту указанной редкости из коллекций указанного уровня"""
+    async with pool.acquire() as conn:
+        query = """
+        SELECT c.*, col.name as collection_name, col.level as collection_level
+        FROM cards c
+        JOIN collections col ON c.collection_id = col.id
+        WHERE c.rarity = $1 
+          AND col.level = $2 
+          AND col.is_available = TRUE
+        ORDER BY RANDOM() 
+        LIMIT 1
+        """
+        result = await conn.fetchrow(query, rarity, collection_level)
+        
+        if result:
+            return dict(result)
+        
+        # Если нет карт в коллекциях этого уровня, пробуем найти без привязки к коллекции
+        backup_query = """
+        SELECT c.*, 'Без коллекции' as collection_name
+        FROM cards c
+        WHERE c.rarity = $1 
+          AND (c.collection_id IS NULL OR 
+               c.collection_id NOT IN (SELECT id FROM collections WHERE is_available = FALSE))
+        ORDER BY RANDOM() 
+        LIMIT 1
+        """
+        backup_result = await conn.fetchrow(backup_query, rarity)
+        
+        if backup_result:
+            backup_dict = dict(backup_result)
+            backup_dict['collection_level'] = 'ordinary'  # Дефолтный уровень
+            return backup_dict
+        
+        return None
+    
+async def get_random_card_by_rarity_fallback(pool, rarity: str) -> Dict:
+    """Fallback: получает любую карту указанной редкости"""
+    async with pool.acquire() as conn:
+        query = """
+        SELECT c.*, 
+               COALESCE(col.name, 'Без коллекции') as collection_name,
+               COALESCE(col.level, 'ordinary') as collection_level
+        FROM cards c
+        LEFT JOIN collections col ON c.collection_id = col.id
+        WHERE c.rarity = $1 
+          AND (col.id IS NULL OR col.is_available = TRUE)
+        ORDER BY RANDOM() 
+        LIMIT 1
+        """
+        result = await conn.fetchrow(query, rarity)
+        return dict(result) if result else None
+
+async def get_filtered_cards_by_rarity_level(pool, rarity: str, level: str) -> List[Dict]:
+    async with pool.acquire() as conn:
+        # ✅ ОТЛАДКА: сколько карт найдено
+        debug_query = """
+        SELECT COUNT(*) as total, 
+               COUNT(CASE WHEN c.rarity = $1 THEN 1 END) as matching_rarity
+        FROM cards c JOIN collections col ON c.collection_id = col.id
+        WHERE col.level = $2 AND col.is_available = TRUE
+        """
+        debug = await conn.fetchrow(debug_query, rarity, level)
+        print(f"DEBUG: rarity={rarity}, level={level}: total={debug['total']}, matching={debug['matching_rarity']}")
+        
+        query = """
+        SELECT c.id, c.player_name, c.rarity, c.collection_id, c.weight, c.uniq_name
+        FROM cards c
+        JOIN collections col ON c.collection_id = col.id
+        WHERE c.rarity = $1 AND col.level = $2 AND col.is_available = TRUE
+        ORDER BY RANDOM()
+        LIMIT 10
+        """
+        cards = await conn.fetch(query, rarity, level)
+        print(f"  Found {len(cards)} cards: {[c['player_name'] for c in cards]}")
+        return [dict(c) for c in cards]
+
+async def get_random_card_by_rarity(pool, rarity: str) -> Dict:
+    """Fallback: ТОЛЬКО нужная редкость"""
+    async with pool.acquire() as conn:
+        query = """
+        SELECT c.* FROM cards c
+        JOIN collections col ON c.collection_id = col.id
+        WHERE c.rarity = $1 AND col.is_available = TRUE
+        ORDER BY RANDOM() LIMIT 1
+        """
+        result = await conn.fetchrow(query, rarity)
+        return dict(result) if result else {'rarity': rarity, 'player_name': 'Fallback'}
+
+def select_rarity(probabilities: Dict[str, float]) -> str:
+    """Выбирает редкость карты на основе вероятностей из пака"""
+    roll = random.random()
+    cumulative = 0
+    
+    for rarity, prob in probabilities.items():
+        cumulative += prob
+        if roll <= cumulative:
+            return rarity
+    
+    return 'common'  # Fallback
+
+def select_weighted(probs: Dict[str, float]) -> str:
+    """Уровень коллекции по весам"""
+    roll = random.random()
+    cumulative = 0
+    for level, prob in probs.items():
+        cumulative += prob
+        if roll <= cumulative: return level
+    return 'ordinary'
+
+async def toggle_collection_available(collection_id: int, available: bool) -> bool:
     pool = await get_db_pool()
     async with pool.acquire() as conn:
-        cards_count = pack['cards_amount']
+        result = await conn.fetchval(
+            "UPDATE collections SET is_available = $1 WHERE id = $2 RETURNING id",
+            available, collection_id
+        )
+    print(f"Collection {collection_id} {'enabled' if available else 'disabled'} for drops")
+    return bool(result)
 
-        print(pack)
-        common_chance = pack['common_chance']
-        rare_chance = pack['rare_chance']
-        epic_chance = pack['epic_chance']
-        legendary_chance = pack['legendary_chance']
-
-        print(common_chance, rare_chance, epic_chance, legendary_chance)
-
-        # Собираем все карты в список
-        selected_cards = []
-        used_card_ids = set()  # Для отслеживания уже выбранных карт в этом паке
-        max_attempts_per_card = 10  # Максимальное количество попыток найти уникальную карту
-        
-        for i in range(cards_count):
-            number = random.randint(0, 99)
-            print(f"Генерация карты {i+1}, число: {number}")
-            
-            card = None
-            attempts = 0
-            
-            # Пытаемся найти уникальную карту
-            while card is None and attempts < max_attempts_per_card:
-                if number < common_chance:
-                    card = await getCard(conn, 'common')
-                    print("попытка генерации common")
-                elif number < common_chance + rare_chance:
-                    card = await getCard(conn, 'rare')
-                    print("попытка генерации rare")
-                elif number < common_chance + rare_chance + epic_chance:
-                    card = await getCard(conn, 'epic')
-                    print("попытка генерации epic")
-                else:
-                    card = await getCard(conn, 'legendary')
-                    print("попытка генерации legendary")
-                
-                # Проверяем что карта найдена и не дублируется
-                if card and card['id'] in used_card_ids:
-                    print(f"Найдена дублирующаяся карта {card['id']}, пробуем снова")
-                    card = None  # Сбрасываем карту и пробуем снова
-                    attempts += 1
-                    # Меняем число для следующей попытки чтобы попробовать другую редкость
-                    number = (number + random.randint(1, 10)) % 100
-                elif card:
-                    # Уникальная карта найдена
-                    break
-                else:
-                    # Карта не найдена, пробуем с другим числом
-                    attempts += 1
-                    number = (number + random.randint(1, 10)) % 100
-            
-            # Добавляем карту в список, если она найдена и уникальна
-            if card and card['id'] not in used_card_ids:
-                selected_cards.append(dict(card))
-                used_card_ids.add(card['id'])
-                print(f"Успешно добавлена карта {card['id']} ({card['rarity']})")
-            else:
-                print(f"Не удалось найти уникальную карту для слота {i+1}")
-
-        # Если карт меньше чем нужно, возвращаем что есть
-        if len(selected_cards) < cards_count:
-            print(f"Warning: Only {len(selected_cards)} unique cards available, but need {cards_count}")
-        
-        print(f"Итоговый набор карт: {[card['id'] for card in selected_cards]}")
-        return selected_cards
+async def get_random_card_by_rarity(pool, rarity: str):
+    """Fallback: случайная карта редкости (если нет коллекций)"""
+    async with pool.acquire() as conn:
+        query = """
+        SELECT c.* FROM cards c
+        JOIN collections col ON c.collection_id = col.id
+        WHERE c.rarity = $1 AND col.is_available = TRUE
+        ORDER BY RANDOM() LIMIT 1
+        """
+        return await conn.fetchrow(query, rarity) or {'rarity': rarity, 'player_name': 'Fallback Card'}
 
 async def getCard(conn, rarity):
     """Получает одну случайную карту указанной редкости из активных коллекций"""
@@ -87,18 +235,6 @@ async def getCard(conn, rarity):
     """
     return await conn.fetchrow(query, rarity)
 
-def select_rarity(probabilities: Dict[str, float]) -> str:
-    """Выбирает редкость на основе вероятностей"""
-    roll = random.random() * 100
-    cumulative = 0
-    
-    for rarity, prob in probabilities.items():
-        cumulative += prob
-        if roll <= cumulative:
-            return rarity
-    
-    return 'common'  # Fallback
-
 # Остальные функции остаются без изменений
 async def get_available_packs(user_id: int) -> List[Dict]:
     """Получает все доступные паки для пользователя"""
@@ -111,75 +247,17 @@ async def get_available_packs(user_id: int) -> List[Dict]:
             ORDER BY cost, id
         """)
         
-        # Коллекционные паки (активные коллекции с доступными картами)
-        collection_packs = await conn.fetch("""
-            SELECT 
-                'collection_' || c.id as id,
-                c.name as name,
-                c.description as description,
-                500 as cost,  -- Фиксированная цена 500 монет
-                3 as cards_amount,  -- Фиксированно 3 карты
-                null as cooldown_hours,
-                'collection' as pack_type,
-                false as is_always_available,
-                30 as common_chance,
-                40 as rare_chance,
-                20 as epic_chance,
-                10 as legendary_chance,
-                c.id as collection_id
-            FROM collections c
-            WHERE c.is_active = true 
-            AND c.end_date > NOW()
-            AND c.cards_opened < c.total_cards  -- Есть доступные карты
-            AND EXISTS (
-                SELECT 1 FROM cards 
-                WHERE collection_id = c.id 
-                LIMIT 1
-            )
-            ORDER BY c.id
-        """)
-        
-        all_packs = [dict(pack) for pack in base_packs] + [dict(pack) for pack in collection_packs]
+        all_packs = [dict(pack) for pack in base_packs]
         return all_packs
 
-async def get_pack_by_id(pack_id) -> Dict:
-    """Получает пак по ID (обрабатывает как числовые, так и строковые ID коллекций)"""
+async def get_pack_by_id(pack_id: any) -> Dict:
     pool = await get_db_pool()
     async with pool.acquire() as conn:
-        if isinstance(pack_id, str) and pack_id.startswith('collection_'):
-            # Это коллекционный пак
-            collection_id = pack_id.replace('collection_', '')
-            pack = await conn.fetchrow("""
-                SELECT 
-                    'collection_' || c.id as id,
-                    c.name as name,
-                    c.description as description,
-                    500 as cost,
-                    3 as cards_amount,
-                    null as cooldown_hours,
-                    'collection' as pack_type,
-                    false as is_always_available,
-                    30 as common_chance,
-                    40 as rare_chance,
-                    20 as epic_chance,
-                    10 as legendary_chance,
-                    c.id as collection_id
-                FROM collections c
-                WHERE c.id = $1 
-                AND c.is_active = true 
-                AND c.end_date > NOW()
-                AND c.cards_opened < c.total_cards  -- Важно: проверяем что еще есть доступные карты
-            """, int(collection_id))
-        else:
-            # Это обычный пак
-            try:
-                pack_id_int = int(pack_id)
-                pack = await conn.fetchrow("SELECT * FROM packs WHERE id = $1", pack_id_int)
-            except (ValueError, TypeError):
-                # Если pack_id нельзя преобразовать в int, пробуем как строку
-                pack = await conn.fetchrow("SELECT * FROM packs WHERE id = $1", str(pack_id))
-        
-        return dict(pack) if pack else None
+        pack_id = int(pack_id)
+        query = "SELECT * FROM packs WHERE id = $1"
+        result = await conn.fetchrow(query, pack_id)
+        return dict(result) if result else {}
+    return {}
 
 async def update_collection_stats(collection_id: int, cards_opened: int):
     """Обновляет статистику коллекции после открытия карт"""

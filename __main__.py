@@ -6,7 +6,6 @@ from aiogram.enums.parse_mode import ParseMode
 from aiogram.client.default import DefaultBotProperties
 from aiogram.fsm.storage.memory import MemoryStorage
 from handlers import setup_message_routers
-from callbacks import setup_callback_routers
 from handlers.chat_packs import router as chat_packs_router
 
 from config import config
@@ -125,8 +124,8 @@ async def check_free_packs_availability(bot: Bot):
                         notification_type = "first_time" if last_free_pack is None else "available"
                         
                         # Отправляем уведомление
-                        await send_free_pack_notification(bot, user_id, notification_type)
-                        await asyncio.sleep(0.1)
+                        # await send_free_pack_notification(bot, user_id, notification_type)
+                        # await asyncio.sleep(0.1)
                         
                         # Обновляем время отправки уведомления
                         await update_notification_sent_time(user_id)
@@ -194,8 +193,8 @@ async def send_free_pack_notification(bot: Bot, user_id: int, notification_type:
 async def on_startup(bot: Bot):
     """Действия при запуске бота"""
     # Запускаем обе фоновые задачи
-    asyncio.create_task(check_referrals_activity_periodically(bot))
-    asyncio.create_task(check_free_packs_availability(bot))
+    # asyncio.create_task(check_referrals_activity_periodically(bot))
+    # asyncio.create_task(check_free_packs_availability(bot))
     print("Фоновые задачи запущены: проверка рефералов и бесплатных паков")
 
 async def main():
@@ -204,16 +203,16 @@ async def main():
     
     bot = Bot(
         token=config.BOT_TOKEN.get_secret_value(),
-        default=DefaultBotProperties(parse_mode=ParseMode.HTML)
-    )
+        default=DefaultBotProperties(
+            parse_mode=ParseMode.HTML
+            )
+        )
     
     dp = Dispatcher(storage=MemoryStorage())
     
     # Регистрация роутеров
     message_routers = setup_message_routers()
-    callback_routers = setup_callback_routers()
     dp.include_router(message_routers)
-    dp.include_router(callback_routers)
     dp.include_router(chat_packs_router)
     
     await on_startup(bot)

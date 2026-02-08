@@ -501,8 +501,8 @@ async def open_pack(callback: CallbackQuery, state: FSMContext, pack_id: int):
         # Добавляем карты пользователю
         card_ids = [card['id'] for card in cards]
         add_result = await add_cards_to_user(user_id, card_ids)
-        serial_numbers = add_result['serial_numbers']
-        print(f"[{datetime.now()}] Карты добавлены пользователю {user_id}, серийные номера: {serial_numbers}")
+        added_count, serial_numbers_dict = await add_cards_to_user(user_id, card_ids)
+        print(f"[{datetime.now()}] Карты добавлены пользователю {user_id}, серийные номера: {serial_numbers_dict}")
         
         # НАЧИСЛЯЕМ ОЧКИ ЗА КАРТЫ - ПЕРЕМЕЩЕНО В НАЧАЛО!
         total_score_earned = 0
@@ -541,22 +541,21 @@ async def open_pack(callback: CallbackQuery, state: FSMContext, pack_id: int):
         await log_pack_opening(user_id, pack['id'], card_ids)
         print(f"[{datetime.now()}] Открытие пака {pack_id} записано в логи")
         
-        # Обновляем статистику
-        await update_collection_stats_by_cards(card_ids)
-        print(f"[{datetime.now()}] Статистика коллекции обновлена")
-        
         # Сохраняем информацию о картах и очках
         card_infos = []
         for i, card in enumerate(sorted_cards):
             # Используем те же очки что уже рассчитали
             card_score = score_details[i]['score']
-            card_info = {
+            card_id = card['id']
+            serial_number = serial_numbers_dict.get(card_id, 0) if isinstance(serial_numbers_dict, dict) else 0
+            
+            cardinfo = {
                 'card': card,
-                'serial_number': serial_numbers.get(card['id'], {}).get('serial_number', 0),
+                'serial_number': serial_number,
                 'collection_name': await get_collection_name(card.get('collection_id')),
                 'score': card_score
             }
-            card_infos.append(card_info)
+            card_infos.append(cardinfo)
         
         # ФИНАЛЬНАЯ ПРОВЕРКА СУММЫ
         calculated_total = sum(info['score'] for info in card_infos)
@@ -615,7 +614,7 @@ def calculate_score_for_card(card: Dict) -> int:
     return score
 
 async def show_opened_card(callback: CallbackQuery, state: FSMContext):
-    """Показывает открытую карту с картинкой и начисленными очками"""
+    """Показывает открытую карту с информацией об уровне коллекции"""
     user_id = callback.from_user.id
     
     try:
@@ -629,37 +628,56 @@ async def show_opened_card(callback: CallbackQuery, state: FSMContext):
         card = current_info['card']
         rarity_style = PackDesign.RARITY_STYLES.get(card['rarity'], PackDesign.RARITY_STYLES['common'])
         
-        print(f"[{datetime.now()}] Отображение карты {current_index + 1}/{len(card_infos)} для пользователя {user_id}, редкость: {card['rarity']}")
+        # Эмодзи для уровней коллекций
+        collection_level_emojis = {
+            'ordinary': '⚪',
+            'rare': '🔵', 
+            'super_rare': '🟣'
+        }
+        
+        # Названия уровней коллекций
+        collection_level_names = {
+            'ordinary': 'Обычная коллекция',
+            'rare': 'Редкая коллекция',
+            'super_rare': 'Супер редкая коллекция'
+        }
+        
+        collection_level = card.get('collection_level', 'ordinary')
+        collection_emoji = collection_level_emojis.get(collection_level, '⚪')
+        collection_name = collection_level_names.get(collection_level, 'Обычная коллекция')
+        
+        print(f"[{datetime.now()}] Отображение карты {current_index + 1}/{len(card_infos)}: "
+              f"{card['player_name']} ({card['rarity']}, {collection_level})")
         
         # Получаем путь к картинке
         image_path = f"players/{card['rarity']}/{card['uniq_name']}.jpg"
         
-        # Создаем текст карточки с информацией об очках
+        # Создаем текст карточки с информацией об уровне коллекции
         card_text = (
             f"🎉 <b>НОВАЯ КАРТА!</b>\n\n"
             f"📦 <b>Пак:</b> {pack_name}\n"
             f"🎴 <b>Карта {current_index + 1}/{len(card_infos)}</b>\n\n"
             f"{rarity_style['color']} {rarity_style['emoji']} <b>{card['player_name']}</b>\n"
             f"{rarity_style['color']} 🏷️ {rarity_style['name']}\n"
-            f"{rarity_style['color']} 🔢 #{current_info['serial_number']:06d}\n"
-            f"{rarity_style['color']} 🎯 {int(card['weight'])}\n"
-            f"{rarity_style['color']} ⭐ <b>Очки:</b> +{current_info['score']}\n"
+            f"{rarity_style['color']} 🔢 <b>Серийный номер:</b> #{current_info['serial_number']:06d}\n"
+            f"{rarity_style['color']} 🎯 <b>Рейтинг:</b> {int(card['weight'])}\n"
         )
         
-        # Добавляем информацию о коллекции
-        if current_info['collection_name']:
-            card_text += f"\n🏆 <b>Коллекция:</b> {current_info['collection_name']}"
+        # Добавляем название конкретной коллекции если есть
+        collection_specific_name = current_info.get('collection_name')
+        if collection_specific_name and collection_specific_name != 'Без коллекции':
+            card_text += f"{rarity_style['color']} 🏆 <b>Коллекция:</b> {collection_specific_name}"
+
+        card_text += f"\n\n⭐ <b>Очки:</b> +{current_info['score']}"
         
         # Показываем общее количество заработанных очков только на последней карте
         if current_index == len(card_infos) - 1 and total_score_earned > 0:
-            # Всегда пересчитываем сумму для точности
             calculated_total = sum(info['score'] for info in card_infos)
-            card_text += f"\n\n🏅 <b>Всего заработано очков за пак:</b> +{calculated_total}"
-            
-        # Создаем клавиатуру
+            card_text += f"\n🏅 <b>Всего заработано очков за пак:</b> +{calculated_total}"
+        
+        # Создаем клавиатуру (остается без изменений)
         keyboard_rows = []
         
-        # Навигация если карт больше одной
         if len(card_infos) > 1:
             nav_buttons = []
             if current_index > 0:
@@ -669,13 +687,10 @@ async def show_opened_card(callback: CallbackQuery, state: FSMContext):
                 nav_buttons.append(InlineKeyboardButton(text="Вперед ▶️", callback_data="card_next"))
             keyboard_rows.append(nav_buttons)
         
-        # Основные кнопки
         action_buttons = []
         if current_index == len(card_infos) - 1:
-            # Если это последняя карта, показываем кнопку для открытия еще паков
             action_buttons.append(InlineKeyboardButton(text="📦 Открыть ещё паков", callback_data="show_shop_packs"))
         else:
-            # Если не последняя карта, показываем кнопку для быстрого перехода к следующей
             action_buttons.append(InlineKeyboardButton(text="⏩ Следующая карта", callback_data="card_next"))
         
         keyboard_rows.append(action_buttons)
@@ -683,9 +698,8 @@ async def show_opened_card(callback: CallbackQuery, state: FSMContext):
         
         keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
         
-        # Всегда отправляем новое сообщение
+        # Отправляем карту
         try:
-            # Удаляем предыдущее сообщение
             await callback.message.delete()
             print(f"[{datetime.now()}] Предыдущее сообщение с картой удалено")
         except Exception as e:

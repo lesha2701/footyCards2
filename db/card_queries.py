@@ -1,43 +1,30 @@
 from db.pool import get_db_pool
 
 async def add_cards_to_user(user_id: int, card_ids):
-    """Добавляет карты пользователю с автоматическим присвоением порядкового номера"""
+    """Возвращает (added_count, serial_numbers)"""
     pool = await get_db_pool()
     added_count = 0
-    serial_numbers = {}  # Будем хранить номера для каждой карточки
+    serial_numbers = {}  # Dict[int, int]
     
     async with pool.acquire() as conn:
         for card_id in card_ids:
             try:
-                # Получаем текущее количество таких карточек в системе
                 count_query = "SELECT COUNT(*) FROM user_cards WHERE card_id = $1"
-                total_copies = await conn.fetchval(count_query, card_id)
-                
-                # Порядковый номер = текущее количество + 1
+                total_copies = await conn.fetchval(count_query, card_id) or 0
                 serial_number = total_copies + 1
                 
-                # Добавляем карту с порядковым номером
                 query = """
                 INSERT INTO user_cards (user_id, card_id, serial_number, obtained_at) 
-                VALUES ($1, $2, $3, NOW())
-                RETURNING id
+                VALUES ($1, $2, $3, NOW()) RETURNING id
                 """
                 result = await conn.fetchval(query, user_id, card_id, serial_number)
-                
                 if result:
                     added_count += 1
-                    serial_numbers[card_id] = {
-                        'serial_number': serial_number,
-                        'total_copies': total_copies + 1  # +1 потому что мы только что добавили
-                    }
-                    print(f"Added card {card_id} to user {user_id} with serial number #{serial_number}")
+                    serial_numbers[card_id] = serial_number
             except Exception as e:
-                print(f"Error adding card {card_id} to user {user_id}: {e}")
-        
-        return {
-            'added_count': added_count,
-            'serial_numbers': serial_numbers
-        }
+                print(f"Error adding card {card_id}: {e}")
+    
+    return added_count, serial_numbers  # ← Tuple!
     
 async def get_card_serial_info(card_id: int):
     """Получает информацию о порядковом номере карточки"""
@@ -211,3 +198,38 @@ async def add_card_to_user(user_id: int, card_id: int):
         """
         result = await conn.fetchrow(query, user_id, card_id, serial_number)
         return dict(result) if result else None
+    
+
+async def get_collection_cards_by_level(pool, level: str):
+    """Все доступные карты из коллекций уровня"""
+    async with pool.acquire() as conn:
+        query = """
+        SELECT c.* 
+        FROM cards c
+        JOIN collections col ON c.collection_id = col.id
+        WHERE col.level = $1 AND col.is_available = TRUE
+        ORDER BY RANDOM()
+        """
+        return await conn.fetch(query, level)
+
+async def get_available_collections_by_card_rarity(card_rarity: str):
+    """Вероятности уровней коллекций для редкости"""
+    probabilities = {
+        'common': {'ordinary': 0.70, 'rare': 0.20, 'super_rare': 0.10},
+        'rare': {'ordinary': 0.60, 'rare': 0.25, 'super_rare': 0.15},
+        'epic': {'ordinary': 0.50, 'rare': 0.30, 'super_rare': 0.20},
+        'legendary': {'ordinary': 0.40, 'rare': 0.40, 'super_rare': 0.20}
+    }
+    return probabilities.get(card_rarity, {'ordinary': 1.0})
+
+async def get_random_card_by_rarity(pool, rarity: str):
+    """Fallback: случайная карта редкости"""
+    async with pool.acquire() as conn:
+        query = """
+        SELECT c.* FROM cards c
+        JOIN collections col ON c.collection_id = col.id
+        WHERE c.rarity = $1 AND col.is_available = TRUE
+        ORDER BY RANDOM() LIMIT 1
+        """
+        result = await conn.fetchrow(query, rarity)
+        return dict(result) if result else {'rarity': rarity, 'player_name': 'Fallback Card'}
